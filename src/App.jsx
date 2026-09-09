@@ -11,10 +11,9 @@ import {
 // ---------- Supabase ----------
 // Project "task-app", created for this app. The anon key is meant to be
 // public — it's restricted by the row-level security policy on app_data
-// (only the single row with id = ROW_ID, see the SQL migration).
+// (each row is scoped to auth.uid(), see the SQL migration).
 const SUPABASE_URL = "https://ezbhodcepwpoxehlaejp.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV6YmhvZGNlcHdwb3hlaGxhZWpwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg5MjIxMDksImV4cCI6MjEwNDQ5ODEwOX0.mnFrUb0bOj_WAQ1fTPDp-8mkuCwwLVVaIRbYSJ8r5eA";
-const ROW_ID = "tasktracker";
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ---------- constants ----------
@@ -289,13 +288,46 @@ const seedAreas = [];
 
 const BOOT_STYLES = `
   .boot-screen {
-    --bg: #0c0e11; --surface: #14171b; --border: #262a30; --text-faint: #565d68;
+    --bg: #0c0e11; --surface: #14171b; --surface-2: #191d22; --border: #262a30;
+    --text: #e9ebee; --text-dim: #8d94a0; --text-faint: #565d68; --amber: #e8a33d; --alta: #f0554b; --blue: #4c8dff;
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     background: var(--bg); display: flex; align-items: center; justify-content: center;
     height: 100vh; min-height: 480px; border-radius: 12px; border: 1px solid var(--border);
   }
   .mono { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
   .boot-msg { color: var(--text-faint); font-size: 14px; }
+
+  .auth-card { width: 340px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 28px; }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 16.5px; color: var(--text); margin-bottom: 20px; }
+  .brand-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 3px rgba(232,163,61,0.15); }
+
+  .auth-divider { display: flex; align-items: center; gap: 10px; margin: 18px 0; color: var(--text-faint); font-size: 11.5px; }
+  .auth-divider::before, .auth-divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+
+  .auth-input {
+    width: 100%; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; color: var(--text); font-size: 14px; outline: none; margin-bottom: 10px;
+  }
+  .auth-input:focus { border-color: rgba(232,163,61,0.5); }
+  .auth-error { font-size: 12.5px; color: var(--alta); margin-bottom: 10px; line-height: 1.5; }
+  .auth-notice { font-size: 12.5px; color: var(--blue); margin-bottom: 10px; line-height: 1.5; }
+
+  .auth-btn {
+    width: 100%; background: var(--amber); color: #1b1304; border: none; border-radius: 9px;
+    padding: 11px; font-size: 14px; font-weight: 700; cursor: pointer;
+  }
+  .auth-btn:hover { filter: brightness(1.08); }
+  .auth-btn:disabled { opacity: 0.6; cursor: default; }
+
+  .auth-switch { width: 100%; background: none; border: none; color: var(--text-dim); font-size: 12.5px; padding: 12px 0 0; cursor: pointer; }
+  .auth-switch:hover { color: var(--text); }
+
+  .auth-guest-btn {
+    width: 100%; padding: 10px; border-radius: 9px; border: 1px dashed var(--border); background: none;
+    color: var(--text-dim); font-size: 13px; cursor: pointer;
+  }
+  .auth-guest-btn:hover { color: var(--text); border-color: var(--text-faint); }
+  .auth-guest-hint { font-size: 11px; color: var(--text-faint); text-align: center; margin-top: 8px; line-height: 1.4; }
 `;
 
 const seedTasks = [];
@@ -441,8 +473,17 @@ export default function TaskTracker() {
   const [areas, setAreas] = useState(seedAreas);
   const [tasks, setTasks] = useState(seedTasks);
 
+  // ---- auth ----
+  const [session, setSession] = useState(null);
+  const [authView, setAuthView] = useState("login"); // login | signup
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authNotice, setAuthNotice] = useState("");
+
   // ---- Supabase persistence (direct, real-time) ----
-  const [bootStatus, setBootStatus] = useState("loading"); // loading | ready
+  const [bootStatus, setBootStatus] = useState("checking-session"); // checking-session | auth | loading | ready
   const [lastSyncAt, setLastSyncAt] = useState(null);
   const [saving, setSaving] = useState(false);
   const hasLoadedRef = useRef(false);
@@ -508,16 +549,42 @@ export default function TaskTracker() {
   const panelNewProjectInputRef = useRef(null);
   const panelNewAreaInputRef = useRef(null);
 
-  // ---- boot: load from disk (or start fresh if running outside Electron) ----
-  // ---- boot: load current data from Supabase, then stay live via realtime ----
+  // ---- auth: watch the session; load/reset app data whenever it changes ----
   useEffect(() => {
     let cancelled = false;
 
-    async function boot() {
+    supabase.auth.getSession().then(({ data }) => {
+      if (cancelled) return;
+      setSession(data.session);
+      setBootStatus(data.session ? "loading" : "auth");
+    });
+
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+      if (!newSession) {
+        hasLoadedRef.current = false;
+        setAreas([]);
+        setTasks([]);
+        setBootStatus("auth");
+      } else if (bootStatus !== "ready" || !hasLoadedRef.current) {
+        setBootStatus("loading");
+      }
+    });
+
+    return () => { cancelled = true; sub.subscription.unsubscribe(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ---- load current data for this user, then stay live via realtime ----
+  useEffect(() => {
+    if (!session) return;
+    let cancelled = false;
+    const userId = session.user.id;
+
+    async function load() {
       const { data: row, error } = await supabase
         .from("app_data")
         .select("data,updated_at")
-        .eq("id", ROW_ID)
         .maybeSingle();
       if (cancelled) return;
       if (error) {
@@ -528,17 +595,22 @@ export default function TaskTracker() {
         setTasks(row.data.tasks || []);
         lastAppliedUpdatedAtRef.current = new Date(row.updated_at).getTime();
         setLastSyncAt(new Date(row.updated_at).getTime());
+      } else {
+        setAreas([]);
+        setTasks([]);
+        lastAppliedUpdatedAtRef.current = 0;
+        setLastSyncAt(null);
       }
       hasLoadedRef.current = true;
       setBootStatus("ready");
     }
-    boot();
+    load();
 
     const channel = supabase
-      .channel("app_data_changes")
+      .channel(`app_data_changes_${userId}`)
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "app_data", filter: `id=eq.${ROW_ID}` },
+        { event: "*", schema: "public", table: "app_data", filter: `user_id=eq.${userId}` },
         (payload) => {
           const row = payload.new;
           if (!row || !row.updated_at) return;
@@ -556,17 +628,17 @@ export default function TaskTracker() {
       cancelled = true;
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [session]);
 
   // ---- autosave (debounced) once real data is loaded ----
   useEffect(() => {
-    if (!hasLoadedRef.current || bootStatus !== "ready") return;
+    if (!session || !hasLoadedRef.current || bootStatus !== "ready") return;
     const id = setTimeout(async () => {
       setSaving(true);
       const updatedAt = new Date().toISOString();
       const { data: row, error } = await supabase
         .from("app_data")
-        .upsert({ id: ROW_ID, data: { areas, tasks }, updated_at: updatedAt }, { onConflict: "id" })
+        .upsert({ user_id: session.user.id, data: { areas, tasks }, updated_at: updatedAt }, { onConflict: "user_id" })
         .select("updated_at")
         .single();
       setSaving(false);
@@ -576,7 +648,40 @@ export default function TaskTracker() {
       }
     }, 600);
     return () => clearTimeout(id);
-  }, [areas, tasks, bootStatus]);
+  }, [areas, tasks, bootStatus, session]);
+
+  async function handleEmailSignIn() {
+    setAuthError(""); setAuthNotice("");
+    if (!authEmail.trim() || !authPassword) { setAuthError("Completá email y contraseña."); return; }
+    setAuthBusy(true);
+    const { error } = await supabase.auth.signInWithPassword({ email: authEmail.trim(), password: authPassword });
+    setAuthBusy(false);
+    if (error) setAuthError(error.message);
+  }
+
+  async function handleEmailSignUp() {
+    setAuthError(""); setAuthNotice("");
+    if (!authEmail.trim() || !authPassword) { setAuthError("Completá email y contraseña."); return; }
+    if (authPassword.length < 6) { setAuthError("La contraseña necesita al menos 6 caracteres."); return; }
+    setAuthBusy(true);
+    const { data, error } = await supabase.auth.signUp({ email: authEmail.trim(), password: authPassword });
+    setAuthBusy(false);
+    if (error) { setAuthError(error.message); return; }
+    if (data.session) return; // confirmación de email desactivada: ya quedó logueado
+    setAuthNotice("Te mandamos un mail para confirmar la cuenta — revisá tu bandeja de entrada.");
+  }
+
+  async function handleGuestLogin() {
+    setAuthError(""); setAuthNotice("");
+    setAuthBusy(true);
+    const { error } = await supabase.auth.signInAnonymously();
+    setAuthBusy(false);
+    if (error) setAuthError("No se pudo entrar como invitado — el proyecto necesita tener 'Anonymous sign-ins' activado en Supabase.");
+  }
+
+  async function handleLogout() {
+    await supabase.auth.signOut();
+  }
 
   useEffect(() => {
     if (manualArea && !areas.some((a) => a.id === manualArea)) setManualArea("");
@@ -1114,11 +1219,60 @@ export default function TaskTracker() {
     );
   }
 
-  if (bootStatus === "loading") {
+  if (bootStatus === "checking-session" || bootStatus === "loading") {
     return (
       <div className="tt-root boot-screen">
         <style>{BOOT_STYLES}</style>
         <div className="boot-msg mono">Cargando...</div>
+      </div>
+    );
+  }
+
+  if (bootStatus === "auth") {
+    return (
+      <div className="tt-root boot-screen">
+        <style>{BOOT_STYLES}</style>
+        <div className="auth-card">
+          <div className="brand"><span className="brand-dot" />Task Tracker</div>
+
+          <input
+            type="email"
+            className="auth-input"
+            placeholder="Email"
+            value={authEmail}
+            onChange={(e) => setAuthEmail(e.target.value)}
+            autoFocus
+          />
+          <input
+            type="password"
+            className="auth-input"
+            placeholder="Contraseña"
+            value={authPassword}
+            onChange={(e) => setAuthPassword(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && (authView === "login" ? handleEmailSignIn() : handleEmailSignUp())}
+          />
+
+          {authError && <div className="auth-error">{authError}</div>}
+          {authNotice && <div className="auth-notice">{authNotice}</div>}
+
+          <button className="auth-btn" disabled={authBusy} onClick={authView === "login" ? handleEmailSignIn : handleEmailSignUp}>
+            {authBusy ? "Un momento..." : authView === "login" ? "Ingresar" : "Crear cuenta"}
+          </button>
+
+          <button
+            className="auth-switch"
+            onClick={() => { setAuthView(authView === "login" ? "signup" : "login"); setAuthError(""); setAuthNotice(""); }}
+          >
+            {authView === "login" ? "¿No tenés cuenta? Creá una" : "¿Ya tenés cuenta? Ingresá"}
+          </button>
+
+          <div className="auth-divider"><span>o</span></div>
+
+          <button className="auth-guest-btn" disabled={authBusy} onClick={handleGuestLogin}>
+            Probar sin cuenta
+          </button>
+          <p className="auth-guest-hint">Entrás directo, sin registrarte. Tus datos quedan atados a este navegador.</p>
+        </div>
       </div>
     );
   }
@@ -1203,6 +1357,17 @@ export default function TaskTracker() {
         }
         .add-area-btn:hover, .add-project-btn:hover { color: var(--text-dim); border-color: var(--text-faint); }
         .sidebar-spacer { flex: 1; }
+        .account-row {
+          display: flex; align-items: center; justify-content: space-between; gap: 10px;
+          padding: 12px; border-top: 1px solid var(--border);
+        }
+        .account-name { font-size: 13px; color: var(--text-dim); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
+        .account-sub { font-size: 11px; color: var(--text-faint); margin-top: 2px; }
+        .account-logout {
+          background: none; border: 1px solid var(--border); border-radius: 7px; color: var(--text-faint);
+          font-size: 11.5px; padding: 5px 10px; cursor: pointer; flex-shrink: 0;
+        }
+        .account-logout:hover { color: var(--alta); border-color: rgba(240,85,75,0.4); }
         .notif-toggle-row {
           display: flex; align-items: center; justify-content: space-between; gap: 10px;
           padding: 12px; margin-top: 8px; border-top: 1px solid var(--border);
@@ -1699,6 +1864,14 @@ export default function TaskTracker() {
         )}
 
         <div className="sidebar-spacer" />
+
+        <div className="account-row">
+          <div className="account-info">
+            <div className="account-name">{session?.user?.is_anonymous ? "Invitado" : (session?.user?.email || "")}</div>
+            <div className="account-sub">{session?.user?.is_anonymous ? "Sesión de prueba" : "Con cuenta"}</div>
+          </div>
+          <button className="account-logout" onClick={handleLogout} title="Cerrar sesión">Salir</button>
+        </div>
 
         <div className="notif-toggle-row">
           <div>
