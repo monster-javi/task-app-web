@@ -1,0 +1,18 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body { background: #0c0e11; }
+
+:root {
+  --bg: #0c0e11;
+  --surface: #14171b;
+  --surface-2: #191d22;
+  --border: #262a30;
+  --text: #e9ebee;
+  --text-dim: #8d94a0;
+  --text-faint: #565d68;
+  --amber: #e8a33d;
+  --blue: #4c8dff;
+  --alta: #f0554b;
+  --media: #e8a33d;
+  --baja: #565d68;
+}
