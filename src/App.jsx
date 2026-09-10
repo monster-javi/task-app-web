@@ -626,7 +626,13 @@ export default function TaskTracker() {
       setBootStatus(data.session ? "loading" : "auth");
     });
 
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, newSession) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((event, newSession) => {
+      if (event === "TOKEN_REFRESHED") {
+        // Same user, just a renewed access token (this fires whenever a
+        // background tab regains focus, among other times) — nothing about
+        // our loaded/unlocked state actually changed, so don't touch it.
+        return;
+      }
       setSession(newSession);
       if (!newSession) {
         hasLoadedRef.current = false;
@@ -678,6 +684,20 @@ export default function TaskTracker() {
       lastAppliedUpdatedAtRef.current = new Date(row.updated_at).getTime();
       setLastSyncAt(new Date(row.updated_at).getTime());
       if (row.data && row.data.encrypted) {
+        if (encryptionKeyRef.current) {
+          // Already unlocked this session — this reload was triggered by
+          // something else (e.g. a session refresh), not a real fresh start.
+          try {
+            const data = await decryptPayload(encryptionKeyRef.current, row.data);
+            setAreas(data.areas || []);
+            setTasks(data.tasks || []);
+            hasLoadedRef.current = true;
+            setBootStatus("ready");
+            return;
+          } catch {
+            // Key no longer matches what's stored; fall back to asking.
+          }
+        }
         pendingEnvelopeRef.current = row.data;
         setBootStatus("enc-unlock");
       } else {
@@ -741,6 +761,7 @@ export default function TaskTracker() {
       const key = await deriveKeyFromPassphrase(encPass, salt);
       const envelope = await encryptPayload(key, { areas, tasks });
       const updatedAt = new Date().toISOString();
+      lastAppliedUpdatedAtRef.current = new Date(updatedAt).getTime();
       const { data: row, error } = await supabase
         .from("app_data")
         .upsert({ user_id: session.user.id, data: { encrypted: true, salt, ...envelope }, updated_at: updatedAt }, { onConflict: "user_id" })
@@ -803,6 +824,7 @@ export default function TaskTracker() {
       await decryptPayload(testKey, row.data); // throws if the passphrase is wrong
 
       const updatedAt = new Date().toISOString();
+      lastAppliedUpdatedAtRef.current = new Date(updatedAt).getTime();
       const { data: savedRow, error } = await supabase
         .from("app_data")
         .upsert({ user_id: session.user.id, data: { encrypted: false, areas, tasks }, updated_at: updatedAt }, { onConflict: "user_id" })
@@ -839,6 +861,11 @@ export default function TaskTracker() {
     const id = setTimeout(async () => {
       setSaving(true);
       const updatedAt = new Date().toISOString();
+      // Mark this write as "ours" *before* it goes out — the realtime echo for
+      // it can arrive over the websocket faster than this same request's own
+      // HTTP response, so updating the ref only afterwards left a race where
+      // our own change could be mistaken for an external one and re-applied.
+      lastAppliedUpdatedAtRef.current = new Date(updatedAt).getTime();
       const dataToSave = encryptionKeyRef.current
         ? { encrypted: true, salt: encSaltRef.current, ...(await encryptPayload(encryptionKeyRef.current, { areas, tasks })) }
         : { encrypted: false, areas, tasks };
@@ -856,13 +883,25 @@ export default function TaskTracker() {
     return () => clearTimeout(id);
   }, [areas, tasks, bootStatus, session]);
 
+  function withTimeout(promise, ms = 12000, message = "Se agotó el tiempo de espera — revisá tu conexión a internet.") {
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms)),
+    ]);
+  }
+
   async function handleEmailSignIn() {
     setAuthError(""); setAuthNotice("");
     if (!authEmail.trim() || !authPassword) { setAuthError("Completá email y contraseña."); return; }
     setAuthBusy(true);
-    const { error } = await supabase.auth.signInWithPassword({ email: authEmail.trim(), password: authPassword });
-    setAuthBusy(false);
-    if (error) setAuthError(error.message);
+    try {
+      const { error } = await withTimeout(supabase.auth.signInWithPassword({ email: authEmail.trim(), password: authPassword }));
+      if (error) setAuthError(error.message);
+    } catch (err) {
+      setAuthError(String(err.message || err));
+    } finally {
+      setAuthBusy(false);
+    }
   }
 
   async function handleEmailSignUp() {
@@ -870,19 +909,29 @@ export default function TaskTracker() {
     if (!authEmail.trim() || !authPassword) { setAuthError("Completá email y contraseña."); return; }
     if (authPassword.length < 6) { setAuthError("La contraseña necesita al menos 6 caracteres."); return; }
     setAuthBusy(true);
-    const { data, error } = await supabase.auth.signUp({ email: authEmail.trim(), password: authPassword });
-    setAuthBusy(false);
-    if (error) { setAuthError(error.message); return; }
-    if (data.session) return; // confirmación de email desactivada: ya quedó logueado
-    setAuthNotice("Te mandamos un mail para confirmar la cuenta — revisá tu bandeja de entrada.");
+    try {
+      const { data, error } = await withTimeout(supabase.auth.signUp({ email: authEmail.trim(), password: authPassword }));
+      if (error) { setAuthError(error.message); return; }
+      if (data.session) return; // confirmación de email desactivada: ya quedó logueado
+      setAuthNotice("Te mandamos un mail para confirmar la cuenta — revisá tu bandeja de entrada.");
+    } catch (err) {
+      setAuthError(String(err.message || err));
+    } finally {
+      setAuthBusy(false);
+    }
   }
 
   async function handleGuestLogin() {
     setAuthError(""); setAuthNotice("");
     setAuthBusy(true);
-    const { error } = await supabase.auth.signInAnonymously();
-    setAuthBusy(false);
-    if (error) setAuthError("No se pudo entrar como invitado — el proyecto necesita tener 'Anonymous sign-ins' activado en Supabase.");
+    try {
+      const { error } = await withTimeout(supabase.auth.signInAnonymously());
+      if (error) setAuthError("No se pudo entrar como invitado — el proyecto necesita tener 'Anonymous sign-ins' activado en Supabase.");
+    } catch (err) {
+      setAuthError(String(err.message || err));
+    } finally {
+      setAuthBusy(false);
+    }
   }
 
   async function handleLogout() {
