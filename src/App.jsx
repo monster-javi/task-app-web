@@ -5,7 +5,7 @@ import {
   Search, Bell, ChevronDown, ChevronRight, ChevronLeft,
   Trash2, Loader2, Plus, Circle, CircleDot, CheckCircle2, Pencil, ListChecks,
   List as ListIcon, Flag, Calendar as CalendarIcon, ChevronsDown, ChevronsUp, X,
-  RefreshCw, Cloud,
+  RefreshCw, Cloud, Download, Upload, Settings,
 } from "lucide-react";
 
 // ---------- Supabase ----------
@@ -527,6 +527,9 @@ export default function TaskTracker() {
   const [urgentIndex, setUrgentIndex] = useState(0);
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [showNotifPanel, setShowNotifPanel] = useState(false);
+  const [showSettingsPanel, setShowSettingsPanel] = useState(false);
+  const [confirmingWipe, setConfirmingWipe] = useState(false);
+  const restoreInputRef = useRef(null);
 
   const [deleteTarget, setDeleteTarget] = useState(null); // { type: 'area'|'project', id, areaId? }
 
@@ -825,6 +828,39 @@ export default function TaskTracker() {
   function showToast(msg) {
     setToast(msg);
     setTimeout(() => setToast(""), 2600);
+  }
+
+  function exportData() {
+    const blob = new Blob([JSON.stringify({ areas, tasks }, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "tasktracker_backup_" + new Date().toISOString().slice(0, 10) + ".json";
+    a.click();
+    URL.revokeObjectURL(a.href);
+    showToast("Backup descargado");
+  }
+
+  function restoreData(evt) {
+    const file = evt.target.files[0];
+    evt.target.value = "";
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      let data;
+      try { data = JSON.parse(e.target.result); } catch (err) { showToast("Archivo inválido"); return; }
+      if (!Array.isArray(data.areas) || !Array.isArray(data.tasks)) { showToast("El archivo no tiene el formato esperado"); return; }
+      setAreas(data.areas);
+      setTasks(data.tasks);
+      showToast("Datos restaurados");
+    };
+    reader.readAsText(file);
+  }
+
+  function wipeAllData() {
+    setAreas([]);
+    setTasks([]);
+    setConfirmingWipe(false);
+    showToast("Todo borrado");
   }
 
   function selectArea(id) {
@@ -1684,7 +1720,7 @@ export default function TaskTracker() {
         .modal-title { font-size: 16px; font-weight: 700; margin-bottom: 8px; }
         .modal-text { font-size: 13.5px; color: var(--text-dim); line-height: 1.5; margin-bottom: 18px; }
         .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
-        .modal-btn { padding: 8px 14px; border-radius: 8px; font-size: 13.5px; cursor: pointer; border: none; }
+        .modal-btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border-radius: 8px; font-size: 13.5px; cursor: pointer; border: none; }
         .modal-btn--cancel { background: var(--surface); border: 1px solid var(--border); color: var(--text-dim); }
         .modal-btn--cancel:hover { color: var(--text); }
         .modal-btn--danger { background: var(--alta); color: #fff; font-weight: 700; }
@@ -1699,6 +1735,11 @@ export default function TaskTracker() {
         .settings-input:focus { border-color: rgba(232,163,61,0.5); }
         .settings-error { font-size: 12.5px; color: var(--alta); margin-bottom: 10px; }
         .settings-check { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--text-dim); margin-bottom: 18px; }
+        .settings-danger-zone {
+          margin: 18px 0; padding: 14px; border: 1px solid rgba(240,85,75,0.3); border-radius: 10px; background: rgba(240,85,75,0.06);
+        }
+        .settings-row-title { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
+        .settings-row-desc { font-size: 12px; color: var(--text-dim); line-height: 1.5; margin-bottom: 12px; }
       `}</style>
 
       {/* Sidebar */}
@@ -1948,6 +1989,16 @@ export default function TaskTracker() {
           <span className="iconbtn icon-only sync-indicator" title={saving ? "Guardando..." : lastSyncAt ? `Sincronizado — ${new Date(lastSyncAt).toLocaleTimeString("es-AR")}` : "Conectado a Supabase"}>
             {saving ? <RefreshCw size={14} className="spin" /> : <Cloud size={14} />}
           </span>
+          <button className="iconbtn" onClick={exportData} title="Descargar un backup en .json">
+            <Download size={13} /> Exportar
+          </button>
+          <button className="iconbtn" onClick={() => restoreInputRef.current?.click()} title="Restaurar desde un backup en .json">
+            <Upload size={13} /> Restaurar
+          </button>
+          <input ref={restoreInputRef} type="file" accept="application/json" style={{ display: "none" }} onChange={restoreData} />
+          <button className="iconbtn icon-only" onClick={() => setShowSettingsPanel(true)} title="Configuración">
+            <Settings size={14} />
+          </button>
         </div>
 
         {view === "lista" ? (
@@ -2298,6 +2349,48 @@ export default function TaskTracker() {
           </div>
         );
       })()}
+
+      {showSettingsPanel && (
+        <div className="modal-overlay" onClick={() => { setShowSettingsPanel(false); setConfirmingWipe(false); }}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => { setShowSettingsPanel(false); setConfirmingWipe(false); }}><X size={16} /></button>
+            <div className="modal-title">Configuración</div>
+
+            {!confirmingWipe ? (
+              <>
+                <div className="modal-text">
+                  Backup manual: descargá tus datos a un archivo, o restaurá desde uno. Independiente de la
+                  sincronización con Supabase — sirve como copia de respaldo aparte.
+                </div>
+                <div className="modal-actions" style={{ justifyContent: "flex-start", gap: 10 }}>
+                  <button className="modal-btn modal-btn--cancel" onClick={exportData}><Download size={13} /> Exportar</button>
+                  <button className="modal-btn modal-btn--cancel" onClick={() => restoreInputRef.current?.click()}><Upload size={13} /> Restaurar</button>
+                </div>
+
+                <div className="settings-danger-zone">
+                  <div className="settings-row-title">Borrar todos los datos</div>
+                  <div className="settings-row-desc">Elimina todas las áreas, proyectos y tareas de tu cuenta. No se puede deshacer.</div>
+                  <button className="modal-btn modal-btn--danger" onClick={() => setConfirmingWipe(true)}>Borrar todos los datos</button>
+                </div>
+
+                <div className="modal-actions">
+                  <button className="modal-btn modal-btn--cancel" onClick={() => setShowSettingsPanel(false)}>Cerrar</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="modal-text">
+                  ¿Borrar <b style={{ color: "var(--alta)" }}>todas</b> tus áreas, proyectos y tareas? Esta acción no se puede deshacer.
+                </div>
+                <div className="modal-actions">
+                  <button className="modal-btn modal-btn--cancel" onClick={() => setConfirmingWipe(false)}>Cancelar</button>
+                  <button className="modal-btn modal-btn--danger" onClick={wipeAllData}>Sí, borrar todo</button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       {deleteTarget && (() => {
         const isArea = deleteTarget.type === "area";
