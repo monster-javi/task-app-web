@@ -743,7 +743,7 @@ export default function TaskTracker() {
       const updatedAt = new Date().toISOString();
       const { data: row, error } = await supabase
         .from("app_data")
-        .upsert({ user_id: session.user.id, data: { encrypted: true, salt, ...envelope }, updated_at }, { onConflict: "user_id" })
+        .upsert({ user_id: session.user.id, data: { encrypted: true, salt, ...envelope }, updated_at: updatedAt }, { onConflict: "user_id" })
         .select("updated_at")
         .single();
       if (error) throw error;
@@ -805,7 +805,7 @@ export default function TaskTracker() {
       const updatedAt = new Date().toISOString();
       const { data: savedRow, error } = await supabase
         .from("app_data")
-        .upsert({ user_id: session.user.id, data: { encrypted: false, areas, tasks }, updated_at }, { onConflict: "user_id" })
+        .upsert({ user_id: session.user.id, data: { encrypted: false, areas, tasks }, updated_at: updatedAt }, { onConflict: "user_id" })
         .select("updated_at")
         .single();
       if (error) throw error;
