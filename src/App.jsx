@@ -16,6 +16,57 @@ const SUPABASE_URL = "https://ezbhodcepwpoxehlaejp.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV6YmhvZGNlcHdwb3hlaGxhZWpwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg5MjIxMDksImV4cCI6MjEwNDQ5ODEwOX0.mnFrUb0bOj_WAQ1fTPDp-8mkuCwwLVVaIRbYSJ8r5eA";
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+// ---------- client-side encryption (Web Crypto API) ----------
+// Zero-knowledge: the passphrase and the derived key never leave this
+// browser. Supabase only ever stores { salt, iv, ciphertext } — random-
+// looking bytes it cannot make sense of. PBKDF2-SHA256 with a high
+// iteration count derives an AES-256-GCM key from the passphrase; GCM's
+// auth tag also means a wrong passphrase fails loudly (decrypt throws)
+// instead of silently returning garbage.
+const PBKDF2_ITERATIONS = 310000;
+
+function randomBytes(n) {
+  return crypto.getRandomValues(new Uint8Array(n));
+}
+
+function bytesToB64(bytes) {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+function b64ToBytes(b64) {
+  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+}
+
+async function deriveKeyFromPassphrase(passphrase, saltB64) {
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey("raw", enc.encode(passphrase), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt: b64ToBytes(saltB64), iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },
+    keyMaterial,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
+async function encryptPayload(key, obj) {
+  const iv = randomBytes(12);
+  const enc = new TextEncoder();
+  const ciphertextBuf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, enc.encode(JSON.stringify(obj)));
+  return { iv: bytesToB64(iv), ciphertext: bytesToB64(new Uint8Array(ciphertextBuf)) };
+}
+
+async function decryptPayload(key, envelope) {
+  const plainBuf = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: b64ToBytes(envelope.iv) },
+    key,
+    b64ToBytes(envelope.ciphertext)
+  );
+  return JSON.parse(new TextDecoder().decode(plainBuf));
+}
+
 // ---------- constants ----------
 
 const PALETTE = ["#4C8DFF", "#34D399", "#A78BFA", "#FB923C", "#F0554B", "#2DD4BF", "#F5C451", "#F472B6", "#60A5FA", "#84CC16"];
@@ -328,6 +379,7 @@ const BOOT_STYLES = `
   }
   .auth-guest-btn:hover { color: var(--text); border-color: var(--text-faint); }
   .auth-guest-hint { font-size: 11px; color: var(--text-faint); text-align: center; margin-top: 8px; line-height: 1.4; }
+  .modal-text { font-size: 13px; color: var(--text-dim); line-height: 1.55; }
 `;
 
 const seedTasks = [];
@@ -482,6 +534,15 @@ export default function TaskTracker() {
   const [authBusy, setAuthBusy] = useState(false);
   const [authNotice, setAuthNotice] = useState("");
 
+  // ---- client-side (zero-knowledge) encryption ----
+  const encryptionKeyRef = useRef(null); // CryptoKey, in-memory only, never persisted
+  const encSaltRef = useRef(null); // this user's salt (not secret, just needs to stay consistent)
+  const pendingEnvelopeRef = useRef(null); // fetched {salt,iv,ciphertext} while waiting to unlock
+  const [encPass, setEncPass] = useState("");
+  const [encPass2, setEncPass2] = useState("");
+  const [encError, setEncError] = useState("");
+  const [encBusy, setEncBusy] = useState(false);
+
   // ---- Supabase persistence (direct, real-time) ----
   const [bootStatus, setBootStatus] = useState("checking-session"); // checking-session | auth | loading | ready
   const [lastSyncAt, setLastSyncAt] = useState(null);
@@ -566,6 +627,10 @@ export default function TaskTracker() {
       setSession(newSession);
       if (!newSession) {
         hasLoadedRef.current = false;
+        encryptionKeyRef.current = null;
+        encSaltRef.current = null;
+        pendingEnvelopeRef.current = null;
+        setEncPass(""); setEncPass2(""); setEncError("");
         setAreas([]);
         setTasks([]);
         setBootStatus("auth");
@@ -593,19 +658,19 @@ export default function TaskTracker() {
       if (error) {
         console.error(error);
         showToast("No se pudo conectar con Supabase");
-      } else if (row) {
-        setAreas(row.data.areas || []);
-        setTasks(row.data.tasks || []);
-        lastAppliedUpdatedAtRef.current = new Date(row.updated_at).getTime();
-        setLastSyncAt(new Date(row.updated_at).getTime());
-      } else {
-        setAreas([]);
-        setTasks([]);
+        return;
+      }
+      if (!row) {
+        // Brand new user: nothing saved yet, needs to set an encryption passphrase first.
         lastAppliedUpdatedAtRef.current = 0;
         setLastSyncAt(null);
+        setBootStatus("enc-setup");
+        return;
       }
-      hasLoadedRef.current = true;
-      setBootStatus("ready");
+      pendingEnvelopeRef.current = row.data;
+      lastAppliedUpdatedAtRef.current = new Date(row.updated_at).getTime();
+      setLastSyncAt(new Date(row.updated_at).getTime());
+      setBootStatus("enc-unlock");
     }
     load();
 
@@ -620,9 +685,14 @@ export default function TaskTracker() {
           const updatedAt = new Date(row.updated_at).getTime();
           if (updatedAt <= lastAppliedUpdatedAtRef.current) return; // our own echo or stale
           lastAppliedUpdatedAtRef.current = updatedAt;
-          setAreas(row.data.areas || []);
-          setTasks(row.data.tasks || []);
-          setLastSyncAt(updatedAt);
+          if (!encryptionKeyRef.current) return; // still locked; will pick up latest on unlock instead
+          decryptPayload(encryptionKeyRef.current, row.data)
+            .then((data) => {
+              setAreas(data.areas || []);
+              setTasks(data.tasks || []);
+              setLastSyncAt(updatedAt);
+            })
+            .catch(() => { /* wrong-session key vs. newer envelope; ignore, next unlock will resync */ });
         }
       )
       .subscribe();
@@ -633,15 +703,66 @@ export default function TaskTracker() {
     };
   }, [session]);
 
-  // ---- autosave (debounced) once real data is loaded ----
+  async function handleEncSetup() {
+    setEncError("");
+    if (encPass.length < 8) { setEncError("Usá al menos 8 caracteres."); return; }
+    if (encPass !== encPass2) { setEncError("Las contraseñas no coinciden."); return; }
+    setEncBusy(true);
+    const salt = bytesToB64(randomBytes(16));
+    const key = await deriveKeyFromPassphrase(encPass, salt);
+    const envelope = await encryptPayload(key, { areas: [], tasks: [] });
+    const updatedAt = new Date().toISOString();
+    const { data: row, error } = await supabase
+      .from("app_data")
+      .upsert({ user_id: session.user.id, data: { encrypted: true, salt, ...envelope }, updated_at }, { onConflict: "user_id" })
+      .select("updated_at")
+      .single();
+    setEncBusy(false);
+    if (error) { setEncError("No se pudo guardar: " + error.message); return; }
+    encryptionKeyRef.current = key;
+    encSaltRef.current = salt;
+    lastAppliedUpdatedAtRef.current = new Date(row.updated_at).getTime();
+    setLastSyncAt(new Date(row.updated_at).getTime());
+    setEncPass(""); setEncPass2("");
+    hasLoadedRef.current = true;
+    setBootStatus("ready");
+  }
+
+  async function handleEncUnlock() {
+    setEncError("");
+    if (!encPass) { setEncError("Ingresá tu contraseña de cifrado."); return; }
+    setEncBusy(true);
+    try {
+      const envelope = pendingEnvelopeRef.current;
+      const key = await deriveKeyFromPassphrase(encPass, envelope.salt);
+      const data = await decryptPayload(key, envelope);
+      encryptionKeyRef.current = key;
+      encSaltRef.current = envelope.salt;
+      setAreas(data.areas || []);
+      setTasks(data.tasks || []);
+      setEncPass("");
+      hasLoadedRef.current = true;
+      setBootStatus("ready");
+    } catch {
+      setEncError("Contraseña incorrecta.");
+    } finally {
+      setEncBusy(false);
+    }
+  }
+
+  // ---- autosave (debounced), encrypting client-side before it ever reaches Supabase ----
   useEffect(() => {
-    if (!session || !hasLoadedRef.current || bootStatus !== "ready") return;
+    if (!session || !hasLoadedRef.current || bootStatus !== "ready" || !encryptionKeyRef.current) return;
     const id = setTimeout(async () => {
       setSaving(true);
+      const envelope = await encryptPayload(encryptionKeyRef.current, { areas, tasks });
       const updatedAt = new Date().toISOString();
       const { data: row, error } = await supabase
         .from("app_data")
-        .upsert({ user_id: session.user.id, data: { areas, tasks }, updated_at: updatedAt }, { onConflict: "user_id" })
+        .upsert(
+          { user_id: session.user.id, data: { encrypted: true, salt: encSaltRef.current, ...envelope }, updated_at: updatedAt },
+          { onConflict: "user_id" }
+        )
         .select("updated_at")
         .single();
       setSaving(false);
@@ -1308,6 +1429,69 @@ export default function TaskTracker() {
             Probar sin cuenta
           </button>
           <p className="auth-guest-hint">Entrás directo, sin registrarte. Tus datos quedan atados a este navegador.</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (bootStatus === "enc-setup") {
+    return (
+      <div className="tt-root boot-screen">
+        <style>{BOOT_STYLES}</style>
+        <div className="auth-card">
+          <div className="brand"><span className="brand-dot" />Task Tracker</div>
+          <div className="modal-text" style={{ marginBottom: 16 }}>
+            Creá una contraseña para cifrar tus datos. Es <b style={{ color: "var(--text)" }}>distinta</b> de tu contraseña
+            de acceso — nunca sale de este navegador, ni Supabase ni nadie más puede verla. Si la olvidás,
+            tus datos quedan cifrados para siempre, sin forma de recuperarlos.
+          </div>
+          <input
+            type="password"
+            className="auth-input"
+            placeholder="Contraseña de cifrado"
+            value={encPass}
+            onChange={(e) => setEncPass(e.target.value)}
+            autoFocus
+          />
+          <input
+            type="password"
+            className="auth-input"
+            placeholder="Repetí la contraseña"
+            value={encPass2}
+            onChange={(e) => setEncPass2(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleEncSetup()}
+          />
+          {encError && <div className="auth-error">{encError}</div>}
+          <button className="auth-btn" disabled={encBusy} onClick={handleEncSetup}>
+            {encBusy ? "Un momento..." : "Crear y continuar"}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (bootStatus === "enc-unlock") {
+    return (
+      <div className="tt-root boot-screen">
+        <style>{BOOT_STYLES}</style>
+        <div className="auth-card">
+          <div className="brand"><span className="brand-dot" />Task Tracker</div>
+          <div className="modal-text" style={{ marginBottom: 16 }}>
+            Tus datos están cifrados. Ingresá tu contraseña de cifrado para desbloquearlos.
+          </div>
+          <input
+            type="password"
+            className="auth-input"
+            placeholder="Contraseña de cifrado"
+            value={encPass}
+            onChange={(e) => setEncPass(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleEncUnlock()}
+            autoFocus
+          />
+          {encError && <div className="auth-error">{encError}</div>}
+          <button className="auth-btn" disabled={encBusy} onClick={handleEncUnlock}>
+            {encBusy ? "Desbloqueando..." : "Desbloquear"}
+          </button>
         </div>
       </div>
     );

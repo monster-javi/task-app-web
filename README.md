@@ -60,9 +60,23 @@ npm run dev
 - Las credenciales de Supabase (URL + `anon key`) están directamente en el
   código (`src/App.jsx`). Es intencional: la `anon key` está pensada para ser
   pública — lo que protege los datos es Row Level Security, no ocultar la key.
-- No hay cifrado de por medio en esta versión — los datos viajan y se guardan
-  en texto plano en Supabase. La versión de escritorio sigue siendo la que
-  tiene cifrado local opcional.
+- **Cifrado de extremo a extremo (zero-knowledge)**: los datos se cifran en
+  tu navegador (AES-256-GCM, clave derivada con PBKDF2 vía Web Crypto API)
+  *antes* de salir hacia Supabase. Supabase solo recibe y guarda bytes
+  cifrados — ni Supabase ni nadie con acceso a la base puede leer tus tareas.
+- La contraseña de cifrado es **distinta** de la contraseña de login, y nunca
+  se envía a ningún servidor — vive únicamente en la memoria de tu navegador
+  mientras usás la app. Se pide una vez por sesión (al cerrar la pestaña o
+  recargar, hay que volver a ingresarla).
+- **Si la olvidás, no hay forma de recuperar los datos.** No existe un
+  "restablecer contraseña" para esto — es la contrapartida inevitable de que
+  ni siquiera nosotros podamos leerlos.
+- Consecuencia directa de este diseño: como Supabase nunca ve el contenido
+  real, **el conector de Supabase de Claude no puede leer ni escribir tareas
+  en esta versión** — solo vería bytes cifrados. Si en algún momento se
+  prioriza esa integración por sobre el cifrado, es una decisión de diseño
+  aparte, no algo que se pueda tener ambas cosas a la vez sobre los mismos
+  datos.
 
 ## Estructura de la tabla en Supabase
 
