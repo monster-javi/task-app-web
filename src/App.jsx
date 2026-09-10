@@ -5,7 +5,7 @@ import {
   Search, Bell, ChevronDown, ChevronRight, ChevronLeft,
   Trash2, Loader2, Plus, Circle, CircleDot, CheckCircle2, Pencil, ListChecks,
   List as ListIcon, Flag, Calendar as CalendarIcon, ChevronsDown, ChevronsUp, X,
-  RefreshCw, Cloud, Download, Upload, Settings,
+  RefreshCw, Cloud, Download, Upload, Settings, Lock, Unlock,
 } from "lucide-react";
 
 // ---------- Supabase ----------
@@ -542,6 +542,9 @@ export default function TaskTracker() {
   const [encPass2, setEncPass2] = useState("");
   const [encError, setEncError] = useState("");
   const [encBusy, setEncBusy] = useState(false);
+  const [isEncrypted, setIsEncrypted] = useState(false);
+  const [showEncSettings, setShowEncSettings] = useState(false);
+  const [encSettingsView, setEncSettingsView] = useState("status"); // status | disable-confirm | enable
 
   // ---- Supabase persistence (direct, real-time) ----
   const [bootStatus, setBootStatus] = useState("checking-session"); // checking-session | auth | loading | ready
@@ -667,10 +670,18 @@ export default function TaskTracker() {
         setBootStatus("enc-setup");
         return;
       }
-      pendingEnvelopeRef.current = row.data;
       lastAppliedUpdatedAtRef.current = new Date(row.updated_at).getTime();
       setLastSyncAt(new Date(row.updated_at).getTime());
-      setBootStatus("enc-unlock");
+      if (row.data && row.data.encrypted) {
+        pendingEnvelopeRef.current = row.data;
+        setBootStatus("enc-unlock");
+      } else {
+        // Legacy row from before encryption existed — load it as-is, but still
+        // require setting a passphrase before anything more gets saved in the clear.
+        setAreas((row.data && row.data.areas) || []);
+        setTasks((row.data && row.data.tasks) || []);
+        setBootStatus("enc-setup");
+      }
     }
     load();
 
@@ -710,7 +721,7 @@ export default function TaskTracker() {
     setEncBusy(true);
     const salt = bytesToB64(randomBytes(16));
     const key = await deriveKeyFromPassphrase(encPass, salt);
-    const envelope = await encryptPayload(key, { areas: [], tasks: [] });
+    const envelope = await encryptPayload(key, { areas, tasks });
     const updatedAt = new Date().toISOString();
     const { data: row, error } = await supabase
       .from("app_data")
@@ -724,8 +735,12 @@ export default function TaskTracker() {
     lastAppliedUpdatedAtRef.current = new Date(row.updated_at).getTime();
     setLastSyncAt(new Date(row.updated_at).getTime());
     setEncPass(""); setEncPass2("");
+    setIsEncrypted(true);
+    setShowEncSettings(false);
+    setEncSettingsView("status");
     hasLoadedRef.current = true;
     setBootStatus("ready");
+    showToast("Cifrado activado");
   }
 
   async function handleEncUnlock() {
@@ -741,6 +756,7 @@ export default function TaskTracker() {
       setAreas(data.areas || []);
       setTasks(data.tasks || []);
       setEncPass("");
+      setIsEncrypted(true);
       hasLoadedRef.current = true;
       setBootStatus("ready");
     } catch {
@@ -748,6 +764,48 @@ export default function TaskTracker() {
     } finally {
       setEncBusy(false);
     }
+  }
+
+  async function handleDisableEncryption() {
+    setEncError("");
+    if (!encPass) { setEncError("Ingresá tu contraseña de cifrado actual."); return; }
+    setEncBusy(true);
+    try {
+      // Verify the entered passphrase against what's actually stored — not just
+      // trusting the in-memory key — so disabling requires proving you have it.
+      const { data: row, error: fetchErr } = await supabase.from("app_data").select("data").maybeSingle();
+      if (fetchErr || !row) throw new Error("no-row");
+      const testKey = await deriveKeyFromPassphrase(encPass, row.data.salt);
+      await decryptPayload(testKey, row.data); // throws if the passphrase is wrong
+
+      const updatedAt = new Date().toISOString();
+      const { data: savedRow, error } = await supabase
+        .from("app_data")
+        .upsert({ user_id: session.user.id, data: { encrypted: false, areas, tasks }, updated_at }, { onConflict: "user_id" })
+        .select("updated_at")
+        .single();
+      if (error) throw error;
+
+      encryptionKeyRef.current = null;
+      encSaltRef.current = null;
+      lastAppliedUpdatedAtRef.current = new Date(savedRow.updated_at).getTime();
+      setLastSyncAt(new Date(savedRow.updated_at).getTime());
+      setIsEncrypted(false);
+      setEncPass("");
+      setShowEncSettings(false);
+      setEncSettingsView("status");
+      showToast("Cifrado desactivado");
+    } catch {
+      setEncError("Contraseña incorrecta.");
+    } finally {
+      setEncBusy(false);
+    }
+  }
+
+  function closeEncSettings() {
+    setShowEncSettings(false);
+    setEncSettingsView("status");
+    setEncPass(""); setEncPass2(""); setEncError("");
   }
 
   // ---- autosave (debounced), encrypting client-side before it ever reaches Supabase ----
@@ -2183,6 +2241,13 @@ export default function TaskTracker() {
           <button className="iconbtn icon-only" onClick={() => setShowSettingsPanel(true)} title="Configuración">
             <Settings size={14} />
           </button>
+          <button
+            className="iconbtn icon-only"
+            onClick={() => setShowEncSettings(true)}
+            title={isEncrypted ? "Datos cifrados — ver cifrado" : "Datos sin cifrar — ver cifrado"}
+          >
+            {isEncrypted ? <Lock size={14} /> : <Unlock size={14} />}
+          </button>
         </div>
 
         {view === "lista" ? (
@@ -2533,6 +2598,98 @@ export default function TaskTracker() {
           </div>
         );
       })()}
+
+      {showEncSettings && (
+        <div className="modal-overlay" onClick={closeEncSettings}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <button className="modal-close" onClick={closeEncSettings}><X size={16} /></button>
+            <div className="modal-title">Cifrado de extremo a extremo</div>
+
+            {encSettingsView === "status" && (
+              <>
+                <div className="modal-text">
+                  {isEncrypted
+                    ? "Tus datos están cifrados en tu navegador antes de llegar a Supabase (AES-256-GCM). Ni Supabase ni nadie con acceso a la base puede leerlos."
+                    : "Tus datos se guardan en Supabase sin cifrar. Podés activar el cifrado de extremo a extremo cuando quieras."}
+                </div>
+                <div className="modal-actions">
+                  <button className="modal-btn modal-btn--cancel" onClick={closeEncSettings}>Cerrar</button>
+                  {isEncrypted ? (
+                    <button className="modal-btn modal-btn--danger" onClick={() => setEncSettingsView("disable-confirm")}>
+                      Desactivar cifrado
+                    </button>
+                  ) : (
+                    <button className="modal-btn modal-btn--primary" onClick={() => setEncSettingsView("enable")}>
+                      Activar cifrado
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+
+            {encSettingsView === "disable-confirm" && (
+              <>
+                <div className="modal-text">
+                  Ingresá tu contraseña de cifrado actual para confirmar que querés desactivarlo.
+                  Una vez desactivado, tus datos quedan en texto plano en Supabase.
+                </div>
+                <input
+                  type="password"
+                  className="settings-input"
+                  placeholder="Contraseña de cifrado actual"
+                  autoFocus
+                  value={encPass}
+                  onChange={(e) => setEncPass(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleDisableEncryption()}
+                />
+                {encError && <div className="settings-error">{encError}</div>}
+                <div className="modal-actions">
+                  <button className="modal-btn modal-btn--cancel" onClick={() => { setEncSettingsView("status"); setEncPass(""); setEncError(""); }}>
+                    Cancelar
+                  </button>
+                  <button className="modal-btn modal-btn--danger" disabled={encBusy} onClick={handleDisableEncryption}>
+                    {encBusy ? "Verificando..." : "Confirmar y desactivar"}
+                  </button>
+                </div>
+              </>
+            )}
+
+            {encSettingsView === "enable" && (
+              <>
+                <div className="modal-text">
+                  Creá una contraseña de cifrado. Es distinta de tu contraseña de acceso y nunca sale de
+                  este navegador. Si la olvidás, no hay forma de recuperar los datos.
+                </div>
+                <input
+                  type="password"
+                  className="settings-input"
+                  placeholder="Contraseña de cifrado"
+                  autoFocus
+                  value={encPass}
+                  onChange={(e) => setEncPass(e.target.value)}
+                />
+                <input
+                  type="password"
+                  className="settings-input"
+                  placeholder="Repetí la contraseña"
+                  value={encPass2}
+                  onChange={(e) => setEncPass2(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleEncSetup()}
+                />
+                {encError && <div className="settings-error">{encError}</div>}
+                <div className="modal-actions">
+                  <button className="modal-btn modal-btn--cancel" onClick={() => { setEncSettingsView("status"); setEncPass(""); setEncPass2(""); setEncError(""); }}>
+                    Cancelar
+                  </button>
+                  <button className="modal-btn modal-btn--primary" disabled={encBusy} onClick={handleEncSetup}>
+                    {encBusy ? "Activando..." : "Activar cifrado"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       {showSettingsPanel && (
         <div className="modal-overlay" onClick={() => { setShowSettingsPanel(false); setConfirmingWipe(false); }}>
