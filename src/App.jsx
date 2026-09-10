@@ -718,29 +718,39 @@ export default function TaskTracker() {
     setEncError("");
     if (encPass.length < 8) { setEncError("Usá al menos 8 caracteres."); return; }
     if (encPass !== encPass2) { setEncError("Las contraseñas no coinciden."); return; }
+    if (!window.isSecureContext || !window.crypto?.subtle) {
+      setEncError("El cifrado necesita HTTPS (o localhost). Esta página no cumple ese requisito.");
+      return;
+    }
     setEncBusy(true);
-    const salt = bytesToB64(randomBytes(16));
-    const key = await deriveKeyFromPassphrase(encPass, salt);
-    const envelope = await encryptPayload(key, { areas, tasks });
-    const updatedAt = new Date().toISOString();
-    const { data: row, error } = await supabase
-      .from("app_data")
-      .upsert({ user_id: session.user.id, data: { encrypted: true, salt, ...envelope }, updated_at }, { onConflict: "user_id" })
-      .select("updated_at")
-      .single();
-    setEncBusy(false);
-    if (error) { setEncError("No se pudo guardar: " + error.message); return; }
-    encryptionKeyRef.current = key;
-    encSaltRef.current = salt;
-    lastAppliedUpdatedAtRef.current = new Date(row.updated_at).getTime();
-    setLastSyncAt(new Date(row.updated_at).getTime());
-    setEncPass(""); setEncPass2("");
-    setIsEncrypted(true);
-    setShowEncSettings(false);
-    setEncSettingsView("status");
-    hasLoadedRef.current = true;
-    setBootStatus("ready");
-    showToast("Cifrado activado");
+    try {
+      const salt = bytesToB64(randomBytes(16));
+      const key = await deriveKeyFromPassphrase(encPass, salt);
+      const envelope = await encryptPayload(key, { areas, tasks });
+      const updatedAt = new Date().toISOString();
+      const { data: row, error } = await supabase
+        .from("app_data")
+        .upsert({ user_id: session.user.id, data: { encrypted: true, salt, ...envelope }, updated_at }, { onConflict: "user_id" })
+        .select("updated_at")
+        .single();
+      if (error) throw error;
+      encryptionKeyRef.current = key;
+      encSaltRef.current = salt;
+      lastAppliedUpdatedAtRef.current = new Date(row.updated_at).getTime();
+      setLastSyncAt(new Date(row.updated_at).getTime());
+      setEncPass(""); setEncPass2("");
+      setIsEncrypted(true);
+      setShowEncSettings(false);
+      setEncSettingsView("status");
+      hasLoadedRef.current = true;
+      setBootStatus("ready");
+      showToast("Cifrado activado");
+    } catch (err) {
+      console.error("handleEncSetup", err);
+      setEncError("No se pudo activar el cifrado: " + String(err.message || err));
+    } finally {
+      setEncBusy(false);
+    }
   }
 
   async function handleEncUnlock() {
@@ -759,8 +769,9 @@ export default function TaskTracker() {
       setIsEncrypted(true);
       hasLoadedRef.current = true;
       setBootStatus("ready");
-    } catch {
-      setEncError("Contraseña incorrecta.");
+    } catch (err) {
+      console.error("handleEncUnlock", err);
+      setEncError(err?.name === "OperationError" ? "Contraseña incorrecta." : "No se pudo desbloquear: " + String(err.message || err));
     } finally {
       setEncBusy(false);
     }
@@ -795,8 +806,9 @@ export default function TaskTracker() {
       setShowEncSettings(false);
       setEncSettingsView("status");
       showToast("Cifrado desactivado");
-    } catch {
-      setEncError("Contraseña incorrecta.");
+    } catch (err) {
+      console.error("handleDisableEncryption", err);
+      setEncError(err?.name === "OperationError" ? "Contraseña incorrecta." : "No se pudo desactivar: " + String(err.message || err));
     } finally {
       setEncBusy(false);
     }
