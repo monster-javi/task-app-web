@@ -60,14 +60,19 @@ npm run dev
 - Las credenciales de Supabase (URL + `anon key`) están directamente en el
   código (`src/App.jsx`). Es intencional: la `anon key` está pensada para ser
   pública — lo que protege los datos es Row Level Security, no ocultar la key.
-- **Cifrado de extremo a extremo (zero-knowledge)**: los datos se cifran en
-  tu navegador (AES-256-GCM, clave derivada con PBKDF2 vía Web Crypto API)
-  *antes* de salir hacia Supabase. Supabase solo recibe y guarda bytes
-  cifrados — ni Supabase ni nadie con acceso a la base puede leer tus tareas.
+- **Cifrado de extremo a extremo (zero-knowledge), opcional**: apagado por
+  defecto — entrás y usás la app normal, sin fricción. Se activa a mano desde
+  el ícono de candado en la topbar, y ahí sí, todo lo que subís a Supabase de
+  ahí en más (AES-256-GCM, clave derivada con PBKDF2 vía Web Crypto API) sale
+  cifrado de tu navegador — Supabase solo recibe y guarda bytes cifrados.
 - La contraseña de cifrado es **distinta** de la contraseña de login, y nunca
   se envía a ningún servidor — vive únicamente en la memoria de tu navegador
   mientras usás la app. Se pide una vez por sesión (al cerrar la pestaña o
-  recargar, hay que volver a ingresarla).
+  recargar, hay que volver a ingresarla) si ya estaba activado antes.
+- Se puede desactivar en cualquier momento desde el mismo ícono — pide la
+  contraseña de cifrado actual como confirmación (la verifica contra lo
+  guardado, no solo contra lo que hay en memoria) antes de volver todo a
+  texto plano.
 - **Si la olvidás, no hay forma de recuperar los datos.** No existe un
   "restablecer contraseña" para esto — es la contrapartida inevitable de que
   ni siquiera nosotros podamos leerlos.

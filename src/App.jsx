@@ -664,10 +664,15 @@ export default function TaskTracker() {
         return;
       }
       if (!row) {
-        // Brand new user: nothing saved yet, needs to set an encryption passphrase first.
+        // Brand new user: start unencrypted, ready right away. Encryption is
+        // opt-in from the lock icon, never forced up front.
         lastAppliedUpdatedAtRef.current = 0;
         setLastSyncAt(null);
-        setBootStatus("enc-setup");
+        setAreas([]);
+        setTasks([]);
+        setIsEncrypted(false);
+        hasLoadedRef.current = true;
+        setBootStatus("ready");
         return;
       }
       lastAppliedUpdatedAtRef.current = new Date(row.updated_at).getTime();
@@ -676,11 +681,13 @@ export default function TaskTracker() {
         pendingEnvelopeRef.current = row.data;
         setBootStatus("enc-unlock");
       } else {
-        // Legacy row from before encryption existed — load it as-is, but still
-        // require setting a passphrase before anything more gets saved in the clear.
+        // Not encrypted (new user's later saves, or a legacy row from before
+        // this feature existed) — just load it straight in.
         setAreas((row.data && row.data.areas) || []);
         setTasks((row.data && row.data.tasks) || []);
-        setBootStatus("enc-setup");
+        setIsEncrypted(false);
+        hasLoadedRef.current = true;
+        setBootStatus("ready");
       }
     }
     load();
@@ -696,6 +703,12 @@ export default function TaskTracker() {
           const updatedAt = new Date(row.updated_at).getTime();
           if (updatedAt <= lastAppliedUpdatedAtRef.current) return; // our own echo or stale
           lastAppliedUpdatedAtRef.current = updatedAt;
+          if (!row.data || !row.data.encrypted) {
+            setAreas((row.data && row.data.areas) || []);
+            setTasks((row.data && row.data.tasks) || []);
+            setLastSyncAt(updatedAt);
+            return;
+          }
           if (!encryptionKeyRef.current) return; // still locked; will pick up latest on unlock instead
           decryptPayload(encryptionKeyRef.current, row.data)
             .then((data) => {
@@ -820,19 +833,18 @@ export default function TaskTracker() {
     setEncPass(""); setEncPass2(""); setEncError("");
   }
 
-  // ---- autosave (debounced), encrypting client-side before it ever reaches Supabase ----
+  // ---- autosave (debounced); encrypts client-side first only if encryption is on ----
   useEffect(() => {
-    if (!session || !hasLoadedRef.current || bootStatus !== "ready" || !encryptionKeyRef.current) return;
+    if (!session || !hasLoadedRef.current || bootStatus !== "ready") return;
     const id = setTimeout(async () => {
       setSaving(true);
-      const envelope = await encryptPayload(encryptionKeyRef.current, { areas, tasks });
       const updatedAt = new Date().toISOString();
+      const dataToSave = encryptionKeyRef.current
+        ? { encrypted: true, salt: encSaltRef.current, ...(await encryptPayload(encryptionKeyRef.current, { areas, tasks })) }
+        : { encrypted: false, areas, tasks };
       const { data: row, error } = await supabase
         .from("app_data")
-        .upsert(
-          { user_id: session.user.id, data: { encrypted: true, salt: encSaltRef.current, ...envelope }, updated_at: updatedAt },
-          { onConflict: "user_id" }
-        )
+        .upsert({ user_id: session.user.id, data: dataToSave, updated_at: updatedAt }, { onConflict: "user_id" })
         .select("updated_at")
         .single();
       setSaving(false);
@@ -1499,42 +1511,6 @@ export default function TaskTracker() {
             Probar sin cuenta
           </button>
           <p className="auth-guest-hint">Entrás directo, sin registrarte. Tus datos quedan atados a este navegador.</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (bootStatus === "enc-setup") {
-    return (
-      <div className="tt-root boot-screen">
-        <style>{BOOT_STYLES}</style>
-        <div className="auth-card">
-          <div className="brand"><span className="brand-dot" />Task Tracker</div>
-          <div className="modal-text" style={{ marginBottom: 16 }}>
-            Creá una contraseña para cifrar tus datos. Es <b style={{ color: "var(--text)" }}>distinta</b> de tu contraseña
-            de acceso — nunca sale de este navegador, ni Supabase ni nadie más puede verla. Si la olvidás,
-            tus datos quedan cifrados para siempre, sin forma de recuperarlos.
-          </div>
-          <input
-            type="password"
-            className="auth-input"
-            placeholder="Contraseña de cifrado"
-            value={encPass}
-            onChange={(e) => setEncPass(e.target.value)}
-            autoFocus
-          />
-          <input
-            type="password"
-            className="auth-input"
-            placeholder="Repetí la contraseña"
-            value={encPass2}
-            onChange={(e) => setEncPass2(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleEncSetup()}
-          />
-          {encError && <div className="auth-error">{encError}</div>}
-          <button className="auth-btn" disabled={encBusy} onClick={handleEncSetup}>
-            {encBusy ? "Un momento..." : "Crear y continuar"}
-          </button>
         </div>
       </div>
     );
