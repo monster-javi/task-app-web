@@ -2019,6 +2019,66 @@ export default function TaskTracker() {
         }
         .settings-row-title { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
         .settings-row-desc { font-size: 12px; color: var(--text-dim); line-height: 1.5; margin-bottom: 12px; }
+
+        /* ---------- MOBILE ---------- */
+        @media (max-width: 820px) {
+          .tt-root { border-radius: 0; min-height: 100vh; font-size: 13px; }
+          .tt-body { flex-direction: column; overflow-y: auto; }
+
+          /* Content first, navigation last — areas/proyectos become a
+             secondary, scroll-to-the-bottom element instead of competing
+             for the top of the screen. Pure flex reorder: nothing about
+             the JSX, data, sync, or encryption logic changes. */
+          .main { order: 1; }
+          .sidebar { order: 2; width: auto; flex-shrink: 0; }
+
+          .topbar { padding: 10px 12px; gap: 7px; flex-wrap: wrap; }
+          .topbar h1, .topbar > div:first-child { font-size: 15.5px; }
+
+          /* Secondary topbar controls (export/restore, settings gear,
+             encryption lock, sync indicator) — de-emphasized into their
+             own compact row instead of crowding the top. */
+          .topbar .iconbtn { order: 5; font-size: 11px; padding: 5px 7px; }
+
+          /* The task entry area is the star: full width, bigger tap
+             targets, nothing squeezed. */
+          .input-card { margin: 12px 10px 6px; }
+          .quick-add-row { padding: 12px 14px; }
+          .quick-add-input { font-size: 15px; }
+
+          .content { padding: 0 10px 10px !important; }
+
+          /* Task list: table -> stacked cards. Title and note ("las
+             notas") come first and stay prominent; status/priority/date
+             and the area tag compact into a secondary row underneath. */
+          .area-columns-header { display: none; }
+          table thead { display: none; }
+          table, tbody, tr, td { display: block; width: auto !important; }
+          tr { display: flex; flex-direction: column; padding: 12px 10px; border-bottom: 1px solid var(--border); }
+          td { padding: 2px 0; border: none !important; }
+
+          td:has(.task-title), td:has(.title-input) { order: 0; }
+          .task-title, .title-input { font-size: 15px; }
+
+          .td-detalle { order: 1; padding-top: 4px; }
+          .note-btn, .note-input { width: 100%; font-size: 14px; }
+          .note-text { white-space: normal; }
+
+          td:has(.area-tag) { order: 2; padding-top: 4px; }
+
+          td.col-center {
+            order: 3; display: inline-flex !important; width: auto !important;
+            margin: 6px 8px 0 0; text-align: left;
+          }
+          td:has(.row-del) { order: 4; position: absolute; top: 10px; right: 8px; }
+          tr { position: relative; }
+
+          /* Modals fill more of a small screen instead of floating as a
+             fixed small card. */
+          .auth-card, .modal-card { max-width: 100%; width: 100%; border-radius: 14px 14px 0 0; }
+
+          .urgent-bar { height: auto; padding: 8px 12px; flex-wrap: wrap; }
+        }
       `}</style>
 
       {/* Sidebar */}
