@@ -413,6 +413,21 @@ function StatusPill({ value, onClick }) {
   );
 }
 
+function MobileQuickAdd({ onAdd }) {
+  const [val, setVal] = useState("");
+  return (
+    <div className="m-quick-add">
+      <Plus size={13} className="m-quick-add-icon" />
+      <input
+        placeholder="Agregar tarea..."
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter" && val.trim()) { onAdd(val); setVal(""); } }}
+      />
+    </div>
+  );
+}
+
 function DateField({ value, onChange, overdue }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState(null);
@@ -543,6 +558,24 @@ export default function TaskTracker() {
   const [encError, setEncError] = useState("");
   const [encBusy, setEncBusy] = useState(false);
   const [isEncrypted, setIsEncrypted] = useState(false);
+
+  // ---- mobile: separate drill-down navigation (areas -> area -> task) ----
+  const [isMobile, setIsMobile] = useState(() => (typeof window !== "undefined" ? window.innerWidth <= 820 : false));
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 820px)");
+    const onChange = () => setIsMobile(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  const [mobileScreen, setMobileScreen] = useState("areas"); // areas | area | task
+  const [mobileAreaId, setMobileAreaId] = useState(null);
+  const [mobileTaskId, setMobileTaskId] = useState(null);
+  const [mobileFilter, setMobileFilter] = useState("pendientes"); // pendientes | vencidas
+  const [mobileSearch, setMobileSearch] = useState("");
+  const [mobileAddingArea, setMobileAddingArea] = useState(false);
+  const [mobileNewAreaName, setMobileNewAreaName] = useState("");
+  const [mobileAddingProjectAreaId, setMobileAddingProjectAreaId] = useState(null);
+  const [mobileNewProjectName, setMobileNewProjectName] = useState("");
   const [showEncSettings, setShowEncSettings] = useState(false);
   const [encSettingsView, setEncSettingsView] = useState("status"); // status | disable-confirm | enable
 
@@ -1336,6 +1369,13 @@ export default function TaskTracker() {
       setTasks((prev) => prev.map((t) => (t.projectId === deleteTarget.id ? { ...t, projectId: null } : t)));
       if (selectedProjectId === deleteTarget.id) setSelectedProjectId(null);
       showToast("Proyecto eliminado");
+    } else if (deleteTarget.type === "task") {
+      removeTask(deleteTarget.id);
+      if (mobileScreen === "task" && mobileTaskId === deleteTarget.id) {
+        setMobileScreen("area");
+        setMobileTaskId(null);
+      }
+      showToast("Tarea eliminada");
     }
     setDeleteTarget(null);
   }
@@ -1410,6 +1450,259 @@ export default function TaskTracker() {
         <col style={{ width: "10%" }} />
         <col style={{ width: "4%" }} />
       </colgroup>
+    );
+  }
+
+  // ======================= MOBILE (drill-down UI) =======================
+  // Areas -> Área (proyectos + notas) -> Nota (opciones extra). Same data,
+  // same handlers, same sync/encryption as the desktop table view above —
+  // this is purely an alternate presentation for narrow screens.
+
+  function openMobileArea(areaId) {
+    setMobileAreaId(areaId);
+    setMobileScreen("area");
+  }
+  function openMobileTask(taskId) {
+    setMobileTaskId(taskId);
+    setMobileScreen("task");
+  }
+  function mobileGoBack() {
+    if (mobileScreen === "task") { setMobileScreen("area"); setMobileTaskId(null); }
+    else if (mobileScreen === "area") { setMobileScreen("areas"); setMobileAreaId(null); }
+  }
+  function mobileToggleDone(id) {
+    setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, status: t.status === "Hecho" ? "Por hacer" : "Hecho" } : t)));
+  }
+  function mobileCountFor(areaId) {
+    const areaTasks = tasks.filter((t) => t.areaId === areaId);
+    return mobileFilter === "vencidas"
+      ? areaTasks.filter((t) => isOverdue(t.date, t.status)).length
+      : areaTasks.filter((t) => t.status !== "Hecho").length;
+  }
+
+  function renderMobileUrgentBar() {
+    const current = urgentItems[urgentIndex] || null;
+    return (
+      <div className="urgent-bar">
+        {current ? (
+          <>
+            <span className={`urgent-label ${current.kind !== "vencida" ? "urgent-label--off" : ""}`}>
+              <span className={`urgent-dot ${current.kind !== "vencida" ? "urgent-dot--off" : ""}`}></span>URGENTES
+            </span>
+            <span className={`urgent-chip urgent-chip--${current.kind}`}>
+              {current.kind === "vencida" ? "Vencida" : current.kind === "hoy" ? "Hoy" : "Mañana"}
+            </span>
+            <span className="urgent-title">{current.task.title}</span>
+          </>
+        ) : (
+          <>
+            <span className="urgent-label urgent-label--off"><span className="urgent-dot urgent-dot--off"></span>URGENTES</span>
+            <span className="urgent-empty">Sin vencimientos ni alertas por ahora.</span>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  function renderMobileAreasScreen() {
+    const visibleAreas = areas.filter((a) => a.name.toLowerCase().includes(mobileSearch.trim().toLowerCase()));
+    return (
+      <div className="m-screen">
+        <div className="m-topbar">
+          <div className="m-filters">
+            <button className={`m-filter ${mobileFilter === "pendientes" ? "m-filter--active" : ""}`} onClick={() => setMobileFilter("pendientes")}>
+              Pendientes <b>{pendientes}</b>
+            </button>
+            <button className={`m-filter ${mobileFilter === "vencidas" ? "m-filter--active" : ""}`} onClick={() => setMobileFilter("vencidas")}>
+              Vencidas <b className={vencidas > 0 ? "m-filter-bad" : ""}>{vencidas}</b>
+            </button>
+            <span style={{ flex: 1 }} />
+            <button className="iconbtn icon-only" onClick={() => setShowSettingsPanel(true)} title="Configuración"><Settings size={14} /></button>
+            <button className="iconbtn icon-only" onClick={() => setShowEncSettings(true)} title="Cifrado">
+              {isEncrypted ? <Lock size={14} /> : <Unlock size={14} />}
+            </button>
+          </div>
+          <div className="m-search-row">
+            <div className="m-search">
+              <Search size={14} className="m-search-icon" />
+              <input placeholder="Buscar área..." value={mobileSearch} onChange={(e) => setMobileSearch(e.target.value)} />
+            </div>
+            <button className="m-add-btn" onClick={() => setMobileAddingArea(true)}><Plus size={18} /></button>
+          </div>
+        </div>
+
+        <div className="m-list">
+          {visibleAreas.map((a) => (
+            <button key={a.id} className="m-area-card" onClick={() => openMobileArea(a.id)}>
+              <span className="m-area-bar" style={{ background: a.color }} />
+              <span className="m-area-name">{a.name.toUpperCase()}</span>
+              <span className="m-area-count">{mobileCountFor(a.id)} pendientes</span>
+              <ChevronRight size={16} className="m-area-chevron" />
+            </button>
+          ))}
+
+          {mobileAddingArea ? (
+            <div className="m-inline-add">
+              <input
+                autoFocus
+                placeholder="Nombre del área"
+                value={mobileNewAreaName}
+                onChange={(e) => setMobileNewAreaName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") { const n = mobileNewAreaName.trim(); if (n) ensureArea(n); setMobileNewAreaName(""); setMobileAddingArea(false); }
+                  if (e.key === "Escape") { setMobileNewAreaName(""); setMobileAddingArea(false); }
+                }}
+                onBlur={() => { const n = mobileNewAreaName.trim(); if (n) ensureArea(n); setMobileNewAreaName(""); setMobileAddingArea(false); }}
+              />
+            </div>
+          ) : (
+            <button className="m-add-area-btn" onClick={() => setMobileAddingArea(true)}><Plus size={14} /> Nueva área</button>
+          )}
+
+          <div className="m-account-row">
+            <div>
+              <div className="m-account-name">{session?.user?.is_anonymous ? "Invitado" : (session?.user?.email || "")}</div>
+              <div className="m-account-sub">{session?.user?.is_anonymous ? "Sesión de prueba" : "Con cuenta"}</div>
+            </div>
+            <button className="m-account-logout" onClick={handleLogout}>Salir</button>
+          </div>
+        </div>
+
+        {renderMobileUrgentBar()}
+      </div>
+    );
+  }
+
+  function renderMobileAreaScreen() {
+    const area = areaMap[mobileAreaId];
+    if (!area) { setMobileScreen("areas"); return null; }
+    const projects = area.projects || [];
+    const tasksOf = (projectId) => tasks.filter((t) => t.areaId === area.id && t.projectId === projectId);
+    const generalTasks = tasks.filter((t) => t.areaId === area.id && !t.projectId);
+
+    function renderTaskRow(t) {
+      const done = t.status === "Hecho";
+      return (
+        <div key={t.id} className="m-task-row">
+          <button className="m-check" onClick={() => mobileToggleDone(t.id)}>
+            {done ? <CheckCircle2 size={20} color="var(--amber)" /> : <Circle size={20} color="var(--text-faint)" />}
+          </button>
+          <button className="m-task-main" onClick={() => openMobileTask(t.id)}>
+            <span className={`m-task-title ${done ? "m-task-title--done" : ""}`}>{t.title}</span>
+            {t.note ? <span className="m-task-note">{t.note}</span> : <span className="m-task-note m-task-note--empty">+ nota</span>}
+          </button>
+          <span className="m-task-icons">
+            {t.priority !== "Media" && <Flag size={13} className={`m-flag m-flag--${t.priority}`} />}
+            {t.date && <CalendarIcon size={13} className={isOverdue(t.date, t.status) ? "m-cal m-cal--overdue" : "m-cal"} />}
+          </span>
+        </div>
+      );
+    }
+
+    return (
+      <div className="m-screen">
+        <div className="m-header">
+          <button className="m-back" onClick={mobileGoBack}><ChevronLeft size={18} /></button>
+          <span className="m-header-dot" style={{ background: area.color }} />
+          <span className="m-header-title">{area.name.toUpperCase()}</span>
+          <span className="m-header-count">{mobileCountFor(area.id)} pendientes</span>
+        </div>
+
+        <div className="m-list">
+          {generalTasks.length > 0 && (
+            <div className="m-project-block">
+              {generalTasks.map(renderTaskRow)}
+            </div>
+          )}
+
+          {projects.map((p) => (
+            <div key={p.id} className="m-project-block">
+              <div className="m-project-header">
+                <span className="m-project-dot" />
+                <span className="m-project-name">{p.name.toUpperCase()}</span>
+                <span className="m-project-count">{tasksOf(p.id).length}</span>
+              </div>
+              {tasksOf(p.id).map(renderTaskRow)}
+              <MobileQuickAdd onAdd={(title) => addQuickTask(area.id, p.id, title)} />
+            </div>
+          ))}
+
+          {generalTasks.length === 0 && (
+            <div className="m-project-block">
+              <MobileQuickAdd onAdd={(title) => addQuickTask(area.id, null, title)} />
+            </div>
+          )}
+
+          {mobileAddingProjectAreaId === area.id ? (
+            <div className="m-inline-add">
+              <input
+                autoFocus
+                placeholder="Nombre del proyecto"
+                value={mobileNewProjectName}
+                onChange={(e) => setMobileNewProjectName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") { createProjectWithName(area.id, mobileNewProjectName); setMobileNewProjectName(""); setMobileAddingProjectAreaId(null); }
+                  if (e.key === "Escape") { setMobileNewProjectName(""); setMobileAddingProjectAreaId(null); }
+                }}
+                onBlur={() => { createProjectWithName(area.id, mobileNewProjectName); setMobileNewProjectName(""); setMobileAddingProjectAreaId(null); }}
+              />
+            </div>
+          ) : (
+            <button className="m-add-area-btn" onClick={() => setMobileAddingProjectAreaId(area.id)}><Plus size={14} /> Nuevo proyecto</button>
+          )}
+        </div>
+
+        {renderMobileUrgentBar()}
+      </div>
+    );
+  }
+
+  function renderMobileTaskScreen() {
+    const t = tasks.find((x) => x.id === mobileTaskId);
+    if (!t) { setMobileScreen("area"); return null; }
+    const area = areaMap[t.areaId];
+    const project = area?.projects?.find((p) => p.id === t.projectId);
+    return (
+      <div className="m-screen">
+        <div className="m-header">
+          <button className="m-back" onClick={mobileGoBack}><ChevronLeft size={18} /></button>
+          <span className="m-header-crumb">{area?.name}{project ? ` · ${project.name}` : ""}</span>
+          <button
+            className="m-header-delete"
+            onClick={() => { setDeleteTarget({ type: "task", id: t.id }); }}
+          ><Trash2 size={16} /></button>
+        </div>
+
+        <div className="m-task-detail">
+          <input
+            className="m-task-detail-title"
+            defaultValue={t.title}
+            onBlur={(e) => commitTaskTitle(t.id, e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+          />
+          <textarea
+            className="m-task-detail-note"
+            placeholder="Nota..."
+            defaultValue={t.note}
+            onBlur={(e) => setNote(t.id, e.target.value)}
+          />
+
+          <div className="m-task-detail-options">
+            <div className="m-option-row">
+              <span className="m-option-label">Estado</span>
+              <StatusPill value={t.status} onClick={() => cycleStatus(t.id)} />
+            </div>
+            <div className="m-option-row">
+              <span className="m-option-label">Prioridad</span>
+              <PriorityBadge value={t.priority} onClick={() => cyclePriority(t.id)} />
+            </div>
+            <div className="m-option-row">
+              <span className="m-option-label">Fecha</span>
+              <DateField value={t.date} onChange={(v) => setDate(t.id, v)} overdue={isOverdue(t.date, t.status)} />
+            </div>
+          </div>
+        </div>
+      </div>
     );
   }
 
@@ -2023,64 +2316,115 @@ export default function TaskTracker() {
         /* ---------- MOBILE ---------- */
         @media (max-width: 820px) {
           .tt-root { border-radius: 0; min-height: 100vh; font-size: 13px; }
-          .tt-body { flex-direction: column; overflow-y: auto; }
 
-          /* Content first, navigation last — areas/proyectos become a
-             secondary, scroll-to-the-bottom element instead of competing
-             for the top of the screen. Pure flex reorder: nothing about
-             the JSX, data, sync, or encryption logic changes. */
-          .main { order: 1; }
-          .sidebar { order: 2; width: auto; flex-shrink: 0; }
-
-          .topbar { padding: 10px 12px; gap: 7px; flex-wrap: wrap; }
-          .topbar h1, .topbar > div:first-child { font-size: 15.5px; }
-
-          /* Secondary topbar controls (export/restore, settings gear,
-             encryption lock, sync indicator) — de-emphasized into their
-             own compact row instead of crowding the top. */
-          .topbar .iconbtn { order: 5; font-size: 11px; padding: 5px 7px; }
-
-          /* The task entry area is the star: full width, bigger tap
-             targets, nothing squeezed. */
-          .input-card { margin: 12px 10px 6px; }
-          .quick-add-row { padding: 12px 14px; }
-          .quick-add-input { font-size: 15px; }
-
-          .content { padding: 0 10px 10px !important; }
-
-          /* Task list: table -> stacked cards. Title and note ("las
-             notas") come first and stay prominent; status/priority/date
-             and the area tag compact into a secondary row underneath. */
-          .area-columns-header { display: none; }
-          table thead { display: none; }
-          table, tbody, tr, td { display: block; width: auto !important; }
-          tr { display: flex; flex-direction: column; padding: 12px 10px; border-bottom: 1px solid var(--border); }
-          td { padding: 2px 0; border: none !important; }
-
-          td:has(.task-title), td:has(.title-input) { order: 0; }
-          .task-title, .title-input { font-size: 15px; }
-
-          .td-detalle { order: 1; padding-top: 4px; }
-          .note-btn, .note-input { width: 100%; font-size: 14px; }
-          .note-text { white-space: normal; }
-
-          td:has(.area-tag) { order: 2; padding-top: 4px; }
-
-          td.col-center {
-            order: 3; display: inline-flex !important; width: auto !important;
-            margin: 6px 8px 0 0; text-align: left;
-          }
-          td:has(.row-del) { order: 4; position: absolute; top: 10px; right: 8px; }
-          tr { position: relative; }
-
-          /* Modals fill more of a small screen instead of floating as a
-             fixed small card. */
+          /* Shared with desktop: modals (login, settings, encryption) fill
+             more of a small screen instead of floating as a small card. */
           .auth-card, .modal-card { max-width: 100%; width: 100%; border-radius: 14px 14px 0 0; }
-
           .urgent-bar { height: auto; padding: 8px 12px; flex-wrap: wrap; }
+
+          /* ---- mobile drill-down screens (areas / área / nota) ---- */
+          .m-screen { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+          .m-list { flex: 1; overflow-y: auto; padding: 10px 12px 16px; }
+
+          .m-topbar { padding: 12px 14px 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+          .m-filters { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+          .m-filter {
+            background: var(--surface-2); border: 1px solid var(--border); color: var(--text-dim);
+            border-radius: 9px; padding: 7px 12px; font-size: 12.5px; display: flex; gap: 5px; cursor: pointer;
+          }
+          .m-filter b { color: var(--text); }
+          .m-filter-bad { color: var(--alta) !important; }
+          .m-filter--active { border-color: rgba(232,163,61,0.5); background: rgba(232,163,61,0.1); }
+          .m-search-row { display: flex; gap: 8px; }
+          .m-search { flex: 1; display: flex; align-items: center; gap: 7px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; padding: 9px 12px; }
+          .m-search-icon { color: var(--text-faint); flex-shrink: 0; }
+          .m-search input { flex: 1; background: none; border: none; outline: none; color: var(--text); font-size: 14px; }
+          .m-search input::placeholder { color: var(--text-faint); }
+          .m-add-btn { width: 40px; height: 40px; flex-shrink: 0; border-radius: 10px; border: none; background: var(--amber); color: #1b1304; display: flex; align-items: center; justify-content: center; }
+
+          .m-area-card {
+            width: 100%; display: flex; align-items: center; gap: 12px; text-align: left;
+            background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+            padding: 15px 14px; margin-bottom: 9px; color: var(--text);
+          }
+          .m-area-bar { width: 3px; align-self: stretch; border-radius: 2px; flex-shrink: 0; }
+          .m-area-name { flex: 1; font-size: 14.5px; font-weight: 700; letter-spacing: 0.01em; }
+          .m-area-count { font-size: 12px; color: var(--text-faint); background: var(--surface-2); padding: 4px 9px; border-radius: 7px; flex-shrink: 0; }
+          .m-area-chevron { color: var(--text-faint); flex-shrink: 0; }
+
+          .m-inline-add, .m-add-area-btn {
+            width: 100%; background: var(--surface); border: 1px dashed var(--border); border-radius: 10px;
+            padding: 13px 14px; color: var(--text-dim); font-size: 14px; display: flex; align-items: center; gap: 8px;
+          }
+          .m-inline-add input { flex: 1; background: none; border: none; outline: none; color: var(--text); font-size: 14px; }
+
+          .m-account-row {
+            display: flex; align-items: center; justify-content: space-between; gap: 10px;
+            margin-top: 18px; padding: 14px; border-top: 1px solid var(--border);
+          }
+          .m-account-name { font-size: 13px; color: var(--text-dim); font-weight: 600; }
+          .m-account-sub { font-size: 11px; color: var(--text-faint); margin-top: 2px; }
+          .m-account-logout { background: none; border: 1px solid var(--border); border-radius: 7px; color: var(--text-faint); font-size: 11.5px; padding: 6px 12px; }
+
+          .m-header {
+            display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+          }
+          .m-back { background: none; border: none; color: var(--text-dim); padding: 4px; display: flex; flex-shrink: 0; }
+          .m-header-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+          .m-header-title { font-size: 15px; font-weight: 700; flex: 1; }
+          .m-header-count { font-size: 12px; color: var(--text-faint); }
+          .m-header-crumb { flex: 1; font-size: 13px; color: var(--text-dim); }
+          .m-header-delete { background: none; border: none; color: var(--text-faint); padding: 4px; }
+
+          .m-project-block { margin-bottom: 18px; }
+          .m-project-header { display: flex; align-items: center; gap: 8px; padding: 4px 4px 8px; }
+          .m-project-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--blue); flex-shrink: 0; }
+          .m-project-name { flex: 1; font-size: 12.5px; font-weight: 700; color: var(--blue); letter-spacing: 0.03em; }
+          .m-project-count { font-size: 11px; color: var(--text-faint); background: var(--surface-2); padding: 2px 7px; border-radius: 999px; }
+
+          .m-task-row {
+            display: flex; align-items: flex-start; gap: 10px; padding: 12px 4px;
+            border-bottom: 1px solid var(--border);
+          }
+          .m-check { background: none; border: none; padding: 1px; flex-shrink: 0; display: flex; }
+          .m-task-main { flex: 1; min-width: 0; text-align: left; background: none; border: none; display: flex; flex-direction: column; gap: 3px; }
+          .m-task-title { font-size: 14.5px; color: var(--text); line-height: 1.35; }
+          .m-task-title--done { color: var(--text-faint); text-decoration: line-through; }
+          .m-task-note { font-size: 12.5px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+          .m-task-note--empty { color: var(--text-faint); opacity: 0.6; }
+          .m-task-icons { display: flex; flex-direction: column; gap: 6px; align-items: center; padding-top: 2px; flex-shrink: 0; }
+          .m-flag { color: var(--text-faint); }
+          .m-flag--Alta { color: var(--alta); }
+          .m-cal { color: var(--text-faint); }
+          .m-cal--overdue { color: var(--alta); }
+
+          .m-quick-add { display: flex; align-items: center; gap: 8px; padding: 10px 4px; color: var(--text-faint); }
+          .m-quick-add-icon { flex-shrink: 0; opacity: 0.7; }
+          .m-quick-add input { flex: 1; background: none; border: none; outline: none; color: var(--text-dim); font-size: 14px; }
+          .m-quick-add input::placeholder { color: var(--text-faint); }
+
+          .m-task-detail { flex: 1; overflow-y: auto; padding: 16px 16px 30px; }
+          .m-task-detail-title {
+            width: 100%; background: none; border: none; outline: none; color: var(--text);
+            font-size: 19px; font-weight: 700; margin-bottom: 12px;
+          }
+          .m-task-detail-note {
+            width: 100%; min-height: 140px; background: var(--surface); border: 1px solid var(--border);
+            border-radius: 10px; padding: 12px; color: var(--text-dim); font-size: 14.5px; line-height: 1.5;
+            outline: none; resize: vertical; font-family: inherit;
+          }
+          .m-task-detail-options { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 14px; }
+          .m-option-row { display: flex; align-items: center; justify-content: space-between; padding: 11px 2px; }
+          .m-option-label { font-size: 13.5px; color: var(--text-faint); }
         }
       `}</style>
 
+      {isMobile ? (
+        mobileScreen === "task" ? renderMobileTaskScreen()
+        : mobileScreen === "area" ? renderMobileAreaScreen()
+        : renderMobileAreasScreen()
+      ) : (
+      <>
       {/* Sidebar */}
       <div className="tt-body">
       <aside className="sidebar">
@@ -2695,6 +3039,8 @@ export default function TaskTracker() {
           </div>
         );
       })()}
+      </>
+      )}
 
       {showEncSettings && (
         <div className="modal-overlay" onClick={closeEncSettings}>
@@ -2832,23 +3178,28 @@ export default function TaskTracker() {
 
       {deleteTarget && (() => {
         const isArea = deleteTarget.type === "area";
+        const isTask = deleteTarget.type === "task";
         const area = isArea ? areaMap[deleteTarget.id] : areaMap[deleteTarget.areaId];
-        const project = isArea ? null : area?.projects?.find((p) => p.id === deleteTarget.id);
+        const project = isArea || isTask ? null : area?.projects?.find((p) => p.id === deleteTarget.id);
+        const task = isTask ? tasks.find((x) => x.id === deleteTarget.id) : null;
         const count = isArea
           ? tasks.filter((t) => t.areaId === deleteTarget.id).length
-          : tasks.filter((t) => t.projectId === deleteTarget.id).length;
+          : isTask ? 0 : tasks.filter((t) => t.projectId === deleteTarget.id).length;
         return (
           <div className="modal-overlay" onClick={() => setDeleteTarget(null)}>
             <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-              <div className="modal-title">{isArea ? `¿Eliminar el área "${area?.name}"?` : `¿Eliminar el proyecto "${project?.name}"?`}</div>
+              <div className="modal-title">
+                {isArea ? `¿Eliminar el área "${area?.name}"?` : isTask ? `¿Eliminar "${task?.title}"?` : `¿Eliminar el proyecto "${project?.name}"?`}
+              </div>
               <div className="modal-text">
                 {isArea
                   ? (count > 0 ? `Esto también va a borrar sus ${count} tarea${count === 1 ? "" : "s"}. Esta acción no se puede deshacer.` : "Esta acción no se puede deshacer.")
+                  : isTask ? "Esta acción no se puede deshacer."
                   : (count > 0 ? `Las ${count} tarea${count === 1 ? "" : "s"} de este proyecto van a quedar sin proyecto asignado, dentro de "${area?.name}".` : "Esta acción no se puede deshacer.")}
               </div>
               <div className="modal-actions">
                 <button className="modal-btn modal-btn--cancel" onClick={() => setDeleteTarget(null)}>Cancelar</button>
-                <button className="modal-btn modal-btn--danger" onClick={confirmDelete}>{isArea ? "Eliminar área" : "Eliminar proyecto"}</button>
+                <button className="modal-btn modal-btn--danger" onClick={confirmDelete}>{isArea ? "Eliminar área" : isTask ? "Eliminar" : "Eliminar proyecto"}</button>
               </div>
             </div>
           </div>
