@@ -5,7 +5,7 @@ import {
   Search, Bell, ChevronDown, ChevronRight, ChevronLeft,
   Trash2, Loader2, Plus, Circle, CircleDot, CheckCircle2, Pencil, ListChecks,
   List as ListIcon, Flag, Calendar as CalendarIcon, ChevronsDown, ChevronsUp, X,
-  RefreshCw, Cloud, Download, Upload, Settings, Lock, Unlock,
+  RefreshCw, Cloud, Download, Upload, Settings, Lock, Unlock, Info,
 } from "lucide-react";
 
 // ---------- Supabase ----------
@@ -413,16 +413,23 @@ function StatusPill({ value, onClick }) {
   );
 }
 
-function MobileQuickAdd({ onAdd }) {
+function MobileQuickAdd({ onAdd, placeholder }) {
   const [val, setVal] = useState("");
+  function submit() {
+    const clean = val.trim();
+    if (!clean) return;
+    onAdd(clean);
+    setVal("");
+  }
   return (
     <div className="m-quick-add">
       <Plus size={13} className="m-quick-add-icon" />
       <input
-        placeholder="Agregar tarea..."
+        placeholder={placeholder || "Agregar nota..."}
         value={val}
         onChange={(e) => setVal(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter" && val.trim()) { onAdd(val); setVal(""); } }}
+        onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+        onBlur={submit}
       />
     </div>
   );
@@ -567,15 +574,18 @@ export default function TaskTracker() {
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
   }, []);
-  const [mobileScreen, setMobileScreen] = useState("areas"); // areas | area | task
+  const [mobileScreen, setMobileScreen] = useState("areas"); // areas | area | task | quickadd
   const [mobileAreaId, setMobileAreaId] = useState(null);
   const [mobileTaskId, setMobileTaskId] = useState(null);
-  const [mobileFilter, setMobileFilter] = useState("pendientes"); // pendientes | vencidas
+  const [mobileExpandedFilter, setMobileExpandedFilter] = useState(null); // null | "pendientes" | "vencidas"
   const [mobileSearch, setMobileSearch] = useState("");
   const [mobileAddingArea, setMobileAddingArea] = useState(false);
   const [mobileNewAreaName, setMobileNewAreaName] = useState("");
   const [mobileAddingProjectAreaId, setMobileAddingProjectAreaId] = useState(null);
   const [mobileNewProjectName, setMobileNewProjectName] = useState("");
+  const [mobileQuickAddAreaId, setMobileQuickAddAreaId] = useState(null);
+  const [mobileQuickAddText, setMobileQuickAddText] = useState("");
+  const mobileSwipeRef = useRef({ x: 0, y: 0, tracking: false });
   const [showEncSettings, setShowEncSettings] = useState(false);
   const [encSettingsView, setEncSettingsView] = useState("status"); // status | disable-confirm | enable
 
@@ -1067,7 +1077,7 @@ export default function TaskTracker() {
   useEffect(() => {
     if (urgentItems.length === 0) return;
     setUrgentIndex((i) => (i >= urgentItems.length ? 0 : i));
-    const id = setInterval(() => setUrgentIndex((i) => (i + 1) % urgentItems.length), 4000);
+    const id = setInterval(() => setUrgentIndex((i) => (i + 1) % urgentItems.length), 3000);
     return () => clearInterval(id);
   }, [urgentItems.length]);
 
@@ -1454,66 +1464,108 @@ export default function TaskTracker() {
   }
 
   // ======================= MOBILE (drill-down UI) =======================
-  // Areas -> Área (proyectos + notas) -> Nota (opciones extra). Same data,
-  // same handlers, same sync/encryption as the desktop table view above —
-  // this is purely an alternate presentation for narrow screens.
+  // Areas -> Área (proyectos + notas) -> Nota (opciones extra), plus a
+  // dedicated fast-entry screen for the "+" button. Same data, same
+  // handlers, same sync/encryption as the desktop table view — this is
+  // purely an alternate presentation for narrow screens.
 
   function openMobileArea(areaId) {
     setMobileAreaId(areaId);
     setMobileScreen("area");
+    setMobileSearch("");
   }
-  function openMobileTask(taskId) {
+  function openMobileTask(taskId, areaId) {
     setMobileTaskId(taskId);
+    if (areaId) setMobileAreaId(areaId);
     setMobileScreen("task");
   }
   function mobileGoBack() {
     if (mobileScreen === "task") { setMobileScreen("area"); setMobileTaskId(null); }
-    else if (mobileScreen === "area") { setMobileScreen("areas"); setMobileAreaId(null); }
+    else if (mobileScreen === "quickadd") { setMobileScreen(mobileAreaId ? "area" : "areas"); }
+    else if (mobileScreen === "area") { setMobileScreen("areas"); setMobileAreaId(null); setMobileSearch(""); }
   }
   function mobileToggleDone(id) {
     setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, status: t.status === "Hecho" ? "Por hacer" : "Hecho" } : t)));
   }
   function mobileCountFor(areaId) {
-    const areaTasks = tasks.filter((t) => t.areaId === areaId);
-    return mobileFilter === "vencidas"
-      ? areaTasks.filter((t) => isOverdue(t.date, t.status)).length
-      : areaTasks.filter((t) => t.status !== "Hecho").length;
+    return tasks.filter((t) => t.areaId === areaId && t.status !== "Hecho").length;
+  }
+  function toggleMobileFilter(kind) {
+    setMobileExpandedFilter((cur) => (cur === kind ? null : kind));
+  }
+  function openMobileQuickAdd() {
+    setMobileQuickAddAreaId(mobileAreaId || (areas[0] && areas[0].id) || null);
+    setMobileScreen("quickadd");
+  }
+
+  // Swipe from near the left edge to the right = go back, like iOS.
+  function mobileSwipeHandlers(canGoBack) {
+    if (!canGoBack) return {};
+    return {
+      onTouchStart: (e) => {
+        const touch = e.touches[0];
+        mobileSwipeRef.current = { x: touch.clientX, y: touch.clientY, tracking: touch.clientX < 36 };
+      },
+      onTouchEnd: (e) => {
+        if (!mobileSwipeRef.current.tracking) return;
+        const touch = e.changedTouches[0];
+        const dx = touch.clientX - mobileSwipeRef.current.x;
+        const dy = Math.abs(touch.clientY - mobileSwipeRef.current.y);
+        mobileSwipeRef.current.tracking = false;
+        if (dx > 70 && dy < 60) mobileGoBack();
+      },
+    };
   }
 
   function renderMobileUrgentBar() {
     const current = urgentItems[urgentIndex] || null;
     return (
-      <div className="urgent-bar">
+      <div
+        className={`urgent-bar ${current ? "urgent-bar--tappable" : ""}`}
+        onClick={() => { if (current) openMobileTask(current.task.id, current.task.areaId); }}
+      >
         {current ? (
           <>
-            <span className={`urgent-label ${current.kind !== "vencida" ? "urgent-label--off" : ""}`}>
-              <span className={`urgent-dot ${current.kind !== "vencida" ? "urgent-dot--off" : ""}`}></span>URGENTES
-            </span>
             <span className={`urgent-chip urgent-chip--${current.kind}`}>
               {current.kind === "vencida" ? "Vencida" : current.kind === "hoy" ? "Hoy" : "Mañana"}
             </span>
             <span className="urgent-title">{current.task.title}</span>
           </>
         ) : (
-          <>
-            <span className="urgent-label urgent-label--off"><span className="urgent-dot urgent-dot--off"></span>URGENTES</span>
-            <span className="urgent-empty">Sin vencimientos ni alertas por ahora.</span>
-          </>
+          <span className="urgent-empty">Sin vencimientos ni alertas por ahora.</span>
         )}
       </div>
     );
   }
 
+  function renderMobileTaskIcons(t) {
+    return (
+      <span className="m-task-icons">
+        <Flag size={13} className={`m-flag m-flag--${t.priority}`} />
+        {t.date && <CalendarIcon size={13} className={isOverdue(t.date, t.status) ? "m-cal m-cal--overdue" : "m-cal"} />}
+        <button className="m-icon-btn" onClick={() => openMobileTask(t.id, t.areaId)} title="Ver detalle"><Info size={15} /></button>
+      </span>
+    );
+  }
+
   function renderMobileAreasScreen() {
-    const visibleAreas = areas.filter((a) => a.name.toLowerCase().includes(mobileSearch.trim().toLowerCase()));
+    const q = mobileSearch.trim().toLowerCase();
+    const matchedAreas = q ? areas.filter((a) => a.name.toLowerCase().includes(q)) : [];
+    const matchedTasks = q ? tasks.filter((t) => t.title.toLowerCase().includes(q) || (t.note || "").toLowerCase().includes(q)) : [];
+    const filteredTasks = mobileExpandedFilter === "vencidas"
+      ? tasks.filter((t) => isOverdue(t.date, t.status))
+      : mobileExpandedFilter === "pendientes"
+      ? tasks.filter((t) => t.status !== "Hecho")
+      : null;
+
     return (
       <div className="m-screen">
         <div className="m-topbar">
           <div className="m-filters">
-            <button className={`m-filter ${mobileFilter === "pendientes" ? "m-filter--active" : ""}`} onClick={() => setMobileFilter("pendientes")}>
+            <button className={`m-filter ${mobileExpandedFilter === "pendientes" ? "m-filter--active" : ""}`} onClick={() => toggleMobileFilter("pendientes")}>
               Pendientes <b>{pendientes}</b>
             </button>
-            <button className={`m-filter ${mobileFilter === "vencidas" ? "m-filter--active" : ""}`} onClick={() => setMobileFilter("vencidas")}>
+            <button className={`m-filter ${mobileExpandedFilter === "vencidas" ? "m-filter--active" : ""}`} onClick={() => toggleMobileFilter("vencidas")}>
               Vencidas <b className={vencidas > 0 ? "m-filter-bad" : ""}>{vencidas}</b>
             </button>
             <span style={{ flex: 1 }} />
@@ -1525,47 +1577,95 @@ export default function TaskTracker() {
           <div className="m-search-row">
             <div className="m-search">
               <Search size={14} className="m-search-icon" />
-              <input placeholder="Buscar área..." value={mobileSearch} onChange={(e) => setMobileSearch(e.target.value)} />
+              <input placeholder="Buscar áreas, proyectos o notas..." value={mobileSearch} onChange={(e) => { setMobileSearch(e.target.value); setMobileExpandedFilter(null); }} />
             </div>
-            <button className="m-add-btn" onClick={() => setMobileAddingArea(true)}><Plus size={18} /></button>
+            <button className="m-add-btn" onClick={openMobileQuickAdd} title="Nueva nota"><Plus size={18} /></button>
           </div>
         </div>
 
         <div className="m-list">
-          {visibleAreas.map((a) => (
-            <button key={a.id} className="m-area-card" onClick={() => openMobileArea(a.id)}>
-              <span className="m-area-bar" style={{ background: a.color }} />
-              <span className="m-area-name">{a.name.toUpperCase()}</span>
-              <span className="m-area-count">{mobileCountFor(a.id)} pendientes</span>
-              <ChevronRight size={16} className="m-area-chevron" />
-            </button>
-          ))}
-
-          {mobileAddingArea ? (
-            <div className="m-inline-add">
-              <input
-                autoFocus
-                placeholder="Nombre del área"
-                value={mobileNewAreaName}
-                onChange={(e) => setMobileNewAreaName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") { const n = mobileNewAreaName.trim(); if (n) ensureArea(n); setMobileNewAreaName(""); setMobileAddingArea(false); }
-                  if (e.key === "Escape") { setMobileNewAreaName(""); setMobileAddingArea(false); }
-                }}
-                onBlur={() => { const n = mobileNewAreaName.trim(); if (n) ensureArea(n); setMobileNewAreaName(""); setMobileAddingArea(false); }}
-              />
-            </div>
+          {q ? (
+            <>
+              {matchedAreas.length === 0 && matchedTasks.length === 0 && <div className="m-empty-hint">Sin resultados para "{mobileSearch}"</div>}
+              {matchedAreas.map((a) => (
+                <button key={a.id} className="m-area-card" onClick={() => openMobileArea(a.id)}>
+                  <span className="m-area-bar" style={{ background: a.color }} />
+                  <span className="m-area-name">{a.name.toUpperCase()}</span>
+                  <span className="m-area-count">{mobileCountFor(a.id)} pendientes</span>
+                  <ChevronRight size={16} className="m-area-chevron" />
+                </button>
+              ))}
+              {matchedTasks.map((t) => {
+                const a = areaMap[t.areaId];
+                return (
+                  <button key={t.id} className="m-search-task" onClick={() => openMobileTask(t.id, t.areaId)}>
+                    <span className="m-search-task-dot" style={{ background: a?.color || "var(--text-faint)" }} />
+                    <span className="m-search-task-title">{t.title}</span>
+                    <span className="m-search-task-area">{a?.name}</span>
+                  </button>
+                );
+              })}
+            </>
+          ) : mobileExpandedFilter ? (
+            <>
+              {filteredTasks.length === 0 && <div className="m-empty-hint">Nada por acá.</div>}
+              {filteredTasks.map((t) => {
+                const a = areaMap[t.areaId];
+                const done = t.status === "Hecho";
+                return (
+                  <div key={t.id} className="m-task-row">
+                    <button className="m-check" onClick={() => mobileToggleDone(t.id)}>
+                      {done ? <CheckCircle2 size={20} color="var(--amber)" /> : <Circle size={20} color="var(--text-faint)" />}
+                    </button>
+                    <button className="m-task-main" onClick={() => openMobileTask(t.id, t.areaId)}>
+                      <span className={`m-task-title ${done ? "m-task-title--done" : ""}`}>{t.title}</span>
+                      <span className="m-task-note m-task-note--empty">
+                        {a?.name}{isOverdue(t.date, t.status) ? " · vencida" : ""}
+                      </span>
+                    </button>
+                    {renderMobileTaskIcons(t)}
+                  </div>
+                );
+              })}
+            </>
           ) : (
-            <button className="m-add-area-btn" onClick={() => setMobileAddingArea(true)}><Plus size={14} /> Nueva área</button>
-          )}
+            <>
+              {areas.map((a) => (
+                <button key={a.id} className="m-area-card" onClick={() => openMobileArea(a.id)}>
+                  <span className="m-area-bar" style={{ background: a.color }} />
+                  <span className="m-area-name">{a.name.toUpperCase()}</span>
+                  <span className="m-area-count">{mobileCountFor(a.id)} pendientes</span>
+                  <ChevronRight size={16} className="m-area-chevron" />
+                </button>
+              ))}
 
-          <div className="m-account-row">
-            <div>
-              <div className="m-account-name">{session?.user?.is_anonymous ? "Invitado" : (session?.user?.email || "")}</div>
-              <div className="m-account-sub">{session?.user?.is_anonymous ? "Sesión de prueba" : "Con cuenta"}</div>
-            </div>
-            <button className="m-account-logout" onClick={handleLogout}>Salir</button>
-          </div>
+              {mobileAddingArea ? (
+                <div className="m-inline-add">
+                  <input
+                    autoFocus
+                    placeholder="Nombre del área"
+                    value={mobileNewAreaName}
+                    onChange={(e) => setMobileNewAreaName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") { const n = mobileNewAreaName.trim(); if (n) ensureArea(n); setMobileNewAreaName(""); setMobileAddingArea(false); }
+                      if (e.key === "Escape") { setMobileNewAreaName(""); setMobileAddingArea(false); }
+                    }}
+                    onBlur={() => { const n = mobileNewAreaName.trim(); if (n) ensureArea(n); setMobileNewAreaName(""); setMobileAddingArea(false); }}
+                  />
+                </div>
+              ) : (
+                <button className="m-add-area-btn" onClick={() => setMobileAddingArea(true)}><Plus size={14} /> Nueva área</button>
+              )}
+
+              <div className="m-account-row">
+                <div>
+                  <div className="m-account-name">{session?.user?.is_anonymous ? "Invitado" : (session?.user?.email || "")}</div>
+                  <div className="m-account-sub">{session?.user?.is_anonymous ? "Sesión de prueba" : "Con cuenta"}</div>
+                </div>
+                <button className="m-account-logout" onClick={handleLogout}>Salir</button>
+              </div>
+            </>
+          )}
         </div>
 
         {renderMobileUrgentBar()}
@@ -1577,41 +1677,78 @@ export default function TaskTracker() {
     const area = areaMap[mobileAreaId];
     if (!area) { setMobileScreen("areas"); return null; }
     const projects = area.projects || [];
-    const tasksOf = (projectId) => tasks.filter((t) => t.areaId === area.id && t.projectId === projectId);
-    const generalTasks = tasks.filter((t) => t.areaId === area.id && !t.projectId);
+    const q = mobileSearch.trim().toLowerCase();
+    const matchesQuery = (t) => !q || t.title.toLowerCase().includes(q) || (t.note || "").toLowerCase().includes(q);
+    const matchesVisibility = (t) => matchesQuery(t) && (!hideCompleted || t.status !== "Hecho");
+    const tasksOf = (projectId) => tasks.filter((t) => t.areaId === area.id && t.projectId === projectId).filter(matchesVisibility);
+    const generalTasks = tasks.filter((t) => t.areaId === area.id && !t.projectId).filter(matchesVisibility);
 
     function renderTaskRow(t) {
       const done = t.status === "Hecho";
       return (
-        <div key={t.id} className="m-task-row">
+        <div key={t.id} className="m-task-row" {...mobileSwipeHandlers(true)}>
           <button className="m-check" onClick={() => mobileToggleDone(t.id)}>
             {done ? <CheckCircle2 size={20} color="var(--amber)" /> : <Circle size={20} color="var(--text-faint)" />}
           </button>
-          <button className="m-task-main" onClick={() => openMobileTask(t.id)}>
-            <span className={`m-task-title ${done ? "m-task-title--done" : ""}`}>{t.title}</span>
-            {t.note ? <span className="m-task-note">{t.note}</span> : <span className="m-task-note m-task-note--empty">+ nota</span>}
-          </button>
-          <span className="m-task-icons">
-            {t.priority !== "Media" && <Flag size={13} className={`m-flag m-flag--${t.priority}`} />}
-            {t.date && <CalendarIcon size={13} className={isOverdue(t.date, t.status) ? "m-cal m-cal--overdue" : "m-cal"} />}
-          </span>
+          <div className="m-task-main">
+            {editingTitleId === t.id ? (
+              <input
+                autoFocus
+                className="m-task-title-input"
+                defaultValue={t.title}
+                onBlur={(e) => { commitTaskTitle(t.id, e.target.value); setEditingTitleId(null); }}
+                onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") setEditingTitleId(null); }}
+              />
+            ) : (
+              <span className={`m-task-title ${done ? "m-task-title--done" : ""}`} onClick={() => setEditingTitleId(t.id)}>{t.title}</span>
+            )}
+            {editingNoteId === t.id ? (
+              <input
+                autoFocus
+                className="m-task-note-input"
+                defaultValue={t.note}
+                onBlur={(e) => { setNote(t.id, e.target.value); setEditingNoteId(null); }}
+                onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") setEditingNoteId(null); }}
+              />
+            ) : t.note ? (
+              <span className="m-task-note" onClick={() => setEditingNoteId(t.id)}>{t.note}</span>
+            ) : (
+              <span className="m-task-note m-task-note--empty" onClick={() => setEditingNoteId(t.id)}>+ nota</span>
+            )}
+          </div>
+          {renderMobileTaskIcons(t)}
         </div>
       );
     }
 
     return (
-      <div className="m-screen">
+      <div className="m-screen" {...mobileSwipeHandlers(true)}>
         <div className="m-header">
           <button className="m-back" onClick={mobileGoBack}><ChevronLeft size={18} /></button>
           <span className="m-header-dot" style={{ background: area.color }} />
           <span className="m-header-title">{area.name.toUpperCase()}</span>
-          <span className="m-header-count">{mobileCountFor(area.id)} pendientes</span>
+          <button className={`m-hide-done ${hideCompleted ? "m-hide-done--active" : ""}`} onClick={() => setHideCompleted((v) => !v)} title="Ocultar hechas">
+            {hideCompleted ? <CheckCircle2 size={13} /> : <Circle size={13} />}
+          </button>
+        </div>
+        <div className="m-search-row m-search-row--sub">
+          <div className="m-search">
+            <Search size={14} className="m-search-icon" />
+            <input placeholder="Buscar notas en esta área..." value={mobileSearch} onChange={(e) => setMobileSearch(e.target.value)} />
+          </div>
+          <button className="m-add-btn" onClick={openMobileQuickAdd} title="Nueva nota"><Plus size={18} /></button>
         </div>
 
         <div className="m-list">
           {generalTasks.length > 0 && (
             <div className="m-project-block">
               {generalTasks.map(renderTaskRow)}
+              <MobileQuickAdd placeholder="Agregar nota (general)..." onAdd={(title) => addQuickTask(area.id, null, title)} />
+            </div>
+          )}
+          {generalTasks.length === 0 && !q && (
+            <div className="m-project-block">
+              <MobileQuickAdd placeholder="Agregar nota (general)..." onAdd={(title) => addQuickTask(area.id, null, title)} />
             </div>
           )}
 
@@ -1623,16 +1760,12 @@ export default function TaskTracker() {
                 <span className="m-project-count">{tasksOf(p.id).length}</span>
               </div>
               {tasksOf(p.id).map(renderTaskRow)}
-              <MobileQuickAdd onAdd={(title) => addQuickTask(area.id, p.id, title)} />
+              <MobileQuickAdd placeholder={`Agregar nota en ${p.name}...`} onAdd={(title) => addQuickTask(area.id, p.id, title)} />
             </div>
           ))}
+        </div>
 
-          {generalTasks.length === 0 && (
-            <div className="m-project-block">
-              <MobileQuickAdd onAdd={(title) => addQuickTask(area.id, null, title)} />
-            </div>
-          )}
-
+        <div className="m-sticky-footer">
           {mobileAddingProjectAreaId === area.id ? (
             <div className="m-inline-add">
               <input
@@ -1663,7 +1796,7 @@ export default function TaskTracker() {
     const area = areaMap[t.areaId];
     const project = area?.projects?.find((p) => p.id === t.projectId);
     return (
-      <div className="m-screen">
+      <div className="m-screen" {...mobileSwipeHandlers(true)}>
         <div className="m-header">
           <button className="m-back" onClick={mobileGoBack}><ChevronLeft size={18} /></button>
           <span className="m-header-crumb">{area?.name}{project ? ` · ${project.name}` : ""}</span>
@@ -1701,6 +1834,57 @@ export default function TaskTracker() {
               <DateField value={t.date} onChange={(v) => setDate(t.id, v)} overdue={isOverdue(t.date, t.status)} />
             </div>
           </div>
+        </div>
+      </div>
+    );
+  }
+
+  function renderMobileQuickAddScreen() {
+    const area = areaMap[mobileQuickAddAreaId] || areas[0];
+    if (!area) {
+      return (
+        <div className="m-screen">
+          <div className="m-header">
+            <button className="m-back" onClick={mobileGoBack}><ChevronLeft size={18} /></button>
+            <span className="m-header-title">Nueva nota</span>
+          </div>
+          <div className="m-empty-hint">Creá un área primero.</div>
+        </div>
+      );
+    }
+    const recent = tasks.filter((x) => x.areaId === area.id && !x.projectId);
+    function submit() {
+      const title = mobileQuickAddText.trim();
+      if (!title) return;
+      addQuickTask(area.id, null, title);
+      setMobileQuickAddText("");
+    }
+    return (
+      <div className="m-screen" {...mobileSwipeHandlers(true)}>
+        <div className="m-header">
+          <button className="m-back" onClick={mobileGoBack}><ChevronLeft size={18} /></button>
+          <select className="m-quickadd-area-select" value={area.id} onChange={(e) => setMobileQuickAddAreaId(e.target.value)}>
+            {areas.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
+        </div>
+        <div className="m-list">
+          {recent.map((t) => (
+            <div key={t.id} className="m-quickadd-item">
+              <Circle size={14} color="var(--text-faint)" />
+              {t.title}
+            </div>
+          ))}
+        </div>
+        <div className="m-quickadd-input-row">
+          <input
+            autoFocus
+            placeholder="Escribí una nota y tocá Enter..."
+            value={mobileQuickAddText}
+            onChange={(e) => setMobileQuickAddText(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+            onBlur={submit}
+          />
+          <button className="m-quickadd-send" onClick={submit}><Plus size={18} /></button>
         </div>
       </div>
     );
@@ -2316,15 +2500,21 @@ export default function TaskTracker() {
         /* ---------- MOBILE ---------- */
         @media (max-width: 820px) {
           .tt-root { border-radius: 0; min-height: 100vh; font-size: 13px; }
+          .tt-root, .tt-root * { touch-action: manipulation; }
 
           /* Shared with desktop: modals (login, settings, encryption) fill
              more of a small screen instead of floating as a small card. */
           .auth-card, .modal-card { max-width: 100%; width: 100%; border-radius: 14px 14px 0 0; }
-          .urgent-bar { height: auto; padding: 8px 12px; flex-wrap: wrap; }
+          .urgent-bar {
+            height: auto; min-height: 56px; padding: 12px 16px; flex-wrap: wrap; align-items: center;
+          }
+          .urgent-bar--tappable { cursor: pointer; }
+          .urgent-bar--tappable:active { background: var(--surface-2); }
 
           /* ---- mobile drill-down screens (areas / área / nota) ---- */
           .m-screen { display: flex; flex-direction: column; height: 100%; min-height: 0; }
           .m-list { flex: 1; overflow-y: auto; padding: 10px 12px 16px; }
+          .m-empty-hint { padding: 30px 10px; text-align: center; color: var(--text-faint); font-size: 13px; }
 
           .m-topbar { padding: 12px 14px 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
           .m-filters { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
@@ -2336,6 +2526,7 @@ export default function TaskTracker() {
           .m-filter-bad { color: var(--alta) !important; }
           .m-filter--active { border-color: rgba(232,163,61,0.5); background: rgba(232,163,61,0.1); }
           .m-search-row { display: flex; gap: 8px; }
+          .m-search-row--sub { padding: 10px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
           .m-search { flex: 1; display: flex; align-items: center; gap: 7px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; padding: 9px 12px; }
           .m-search-icon { color: var(--text-faint); flex-shrink: 0; }
           .m-search input { flex: 1; background: none; border: none; outline: none; color: var(--text); font-size: 14px; }
@@ -2351,6 +2542,15 @@ export default function TaskTracker() {
           .m-area-name { flex: 1; font-size: 14.5px; font-weight: 700; letter-spacing: 0.01em; }
           .m-area-count { font-size: 12px; color: var(--text-faint); background: var(--surface-2); padding: 4px 9px; border-radius: 7px; flex-shrink: 0; }
           .m-area-chevron { color: var(--text-faint); flex-shrink: 0; }
+
+          .m-search-task {
+            width: 100%; display: flex; align-items: center; gap: 10px; text-align: left;
+            background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+            padding: 12px 14px; margin-bottom: 7px; color: var(--text);
+          }
+          .m-search-task-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+          .m-search-task-title { flex: 1; font-size: 13.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+          .m-search-task-area { font-size: 11px; color: var(--text-faint); flex-shrink: 0; }
 
           .m-inline-add, .m-add-area-btn {
             width: 100%; background: var(--surface); border: 1px dashed var(--border); border-radius: 10px;
@@ -2375,6 +2575,8 @@ export default function TaskTracker() {
           .m-header-count { font-size: 12px; color: var(--text-faint); }
           .m-header-crumb { flex: 1; font-size: 13px; color: var(--text-dim); }
           .m-header-delete { background: none; border: none; color: var(--text-faint); padding: 4px; }
+          .m-hide-done { background: var(--surface-2); border: 1px solid var(--border); color: var(--text-faint); border-radius: 7px; padding: 6px 9px; display: flex; }
+          .m-hide-done--active { color: var(--amber); border-color: rgba(232,163,61,0.4); }
 
           .m-project-block { margin-bottom: 18px; }
           .m-project-header { display: flex; align-items: center; gap: 8px; padding: 4px 4px 8px; }
@@ -2383,25 +2585,34 @@ export default function TaskTracker() {
           .m-project-count { font-size: 11px; color: var(--text-faint); background: var(--surface-2); padding: 2px 7px; border-radius: 999px; }
 
           .m-task-row {
-            display: flex; align-items: flex-start; gap: 10px; padding: 12px 4px;
+            display: flex; align-items: center; gap: 10px; padding: 12px 4px;
             border-bottom: 1px solid var(--border);
           }
           .m-check { background: none; border: none; padding: 1px; flex-shrink: 0; display: flex; }
           .m-task-main { flex: 1; min-width: 0; text-align: left; background: none; border: none; display: flex; flex-direction: column; gap: 3px; }
           .m-task-title { font-size: 14.5px; color: var(--text); line-height: 1.35; }
           .m-task-title--done { color: var(--text-faint); text-decoration: line-through; }
+          .m-task-title-input, .m-task-note-input {
+            width: 100%; background: var(--surface-2); border: 1px solid rgba(232,163,61,0.4); border-radius: 6px;
+            outline: none; color: var(--text); font-size: 14px; padding: 5px 7px; font-family: inherit;
+          }
           .m-task-note { font-size: 12.5px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
           .m-task-note--empty { color: var(--text-faint); opacity: 0.6; }
-          .m-task-icons { display: flex; flex-direction: column; gap: 6px; align-items: center; padding-top: 2px; flex-shrink: 0; }
+          .m-task-icons { display: flex; flex-direction: row; gap: 8px; align-items: center; flex-shrink: 0; }
           .m-flag { color: var(--text-faint); }
+          .m-flag--Baja { color: var(--text-faint); }
+          .m-flag--Media { color: var(--amber); }
           .m-flag--Alta { color: var(--alta); }
           .m-cal { color: var(--text-faint); }
           .m-cal--overdue { color: var(--alta); }
+          .m-icon-btn { background: none; border: none; color: var(--text-faint); padding: 2px; display: flex; }
 
-          .m-quick-add { display: flex; align-items: center; gap: 8px; padding: 10px 4px; color: var(--text-faint); }
+          .m-quick-add { display: flex; align-items: center; gap: 8px; padding: 11px 4px; color: var(--text-faint); background: rgba(255,255,255,0.015); border-radius: 8px; margin-top: 2px; }
           .m-quick-add-icon { flex-shrink: 0; opacity: 0.7; }
           .m-quick-add input { flex: 1; background: none; border: none; outline: none; color: var(--text-dim); font-size: 14px; }
-          .m-quick-add input::placeholder { color: var(--text-faint); }
+          .m-quick-add input::placeholder { color: var(--text-faint); font-size: 13px; }
+
+          .m-sticky-footer { padding: 10px 12px; border-top: 1px solid var(--border); flex-shrink: 0; }
 
           .m-task-detail { flex: 1; overflow-y: auto; padding: 16px 16px 30px; }
           .m-task-detail-title {
@@ -2416,11 +2627,25 @@ export default function TaskTracker() {
           .m-task-detail-options { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 14px; }
           .m-option-row { display: flex; align-items: center; justify-content: space-between; padding: 11px 2px; }
           .m-option-label { font-size: 13.5px; color: var(--text-faint); }
+
+          /* ---- quick-note-entry screen ---- */
+          .m-quickadd-area-select {
+            flex: 1; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+            color: var(--text); font-size: 14px; font-weight: 700; padding: 8px 10px;
+          }
+          .m-quickadd-item { display: flex; align-items: center; gap: 10px; padding: 11px 4px; font-size: 14px; color: var(--text-dim); border-bottom: 1px solid var(--border); }
+          .m-quickadd-input-row { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border); flex-shrink: 0; }
+          .m-quickadd-input-row input {
+            flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+            padding: 12px 14px; color: var(--text); font-size: 15px; outline: none;
+          }
+          .m-quickadd-send { width: 44px; flex-shrink: 0; border-radius: 10px; border: none; background: var(--amber); color: #1b1304; display: flex; align-items: center; justify-content: center; }
         }
       `}</style>
 
       {isMobile ? (
         mobileScreen === "task" ? renderMobileTaskScreen()
+        : mobileScreen === "quickadd" ? renderMobileQuickAddScreen()
         : mobileScreen === "area" ? renderMobileAreaScreen()
         : renderMobileAreasScreen()
       ) : (
