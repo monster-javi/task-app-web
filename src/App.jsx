@@ -1491,16 +1491,13 @@ export default function TaskTracker() {
     else if (mobileScreen === "area") { setMobileScreen("areas"); setMobileAreaId(null); setMobileSearch(""); }
   }
   function mobileToggleDone(id, currentlyDone) {
-    if (currentlyDone) {
-      // un-checking: no animation needed, just flip it back immediately
-      setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, status: "Por hacer" } : t)));
-      return;
+    setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, status: currentlyDone ? "Por hacer" : "Hecho" } : t)));
+    if (!currentlyDone) {
+      setMobileCompletingIds((prev) => new Set(prev).add(id));
+      setTimeout(() => {
+        setMobileCompletingIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
+      }, 1000);
     }
-    setMobileCompletingIds((prev) => new Set(prev).add(id));
-    setTimeout(() => {
-      setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, status: "Hecho" } : t)));
-      setMobileCompletingIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
-    }, 1000);
   }
   function mobileCountFor(areaId) {
     return tasks.filter((t) => t.areaId === areaId && t.status !== "Hecho").length;
@@ -1564,6 +1561,114 @@ export default function TaskTracker() {
     );
   }
 
+  function taskRowSwipeHandlers(t) {
+    return {
+      onTouchStart: (e) => {
+        e.stopPropagation();
+        const touch = e.touches[0];
+        mobileSwipeRef.current = { x: touch.clientX, y: touch.clientY, tracking: true, taskId: t.id };
+        mobileLongPressRef.current.x = touch.clientX;
+        mobileLongPressRef.current.y = touch.clientY;
+        mobileLongPressRef.current.taskId = t.id;
+        mobileLongPressRef.current.lastOverId = t.id;
+        clearTimeout(mobileLongPressRef.current.timer);
+        mobileLongPressRef.current.timer = setTimeout(() => {
+          mobileSwipeRef.current.tracking = false; // long-press claims the gesture; cancel swipe/back
+          setMobileDraggingTaskId(t.id);
+          setMobileDragOffsetY(0);
+        }, 450);
+      },
+      onTouchMove: (e) => {
+        e.stopPropagation();
+        const touch = e.touches[0];
+        if (mobileDraggingTaskId === t.id) {
+          setMobileDragOffsetY(touch.clientY - mobileLongPressRef.current.y);
+          const el = document.elementFromPoint(touch.clientX, touch.clientY);
+          const rowEl = el && el.closest && el.closest("[data-task-id]");
+          const overId = rowEl && rowEl.getAttribute("data-task-id");
+          if (overId && overId !== mobileLongPressRef.current.lastOverId) {
+            reorderTask(t.id, overId);
+            mobileLongPressRef.current.lastOverId = overId;
+          }
+          return;
+        }
+        const dx = Math.abs(touch.clientX - mobileLongPressRef.current.x);
+        const dy = Math.abs(touch.clientY - mobileLongPressRef.current.y);
+        if (dx > 10 || dy > 10) clearTimeout(mobileLongPressRef.current.timer);
+      },
+      onTouchEnd: (e) => {
+        e.stopPropagation();
+        clearTimeout(mobileLongPressRef.current.timer);
+        if (mobileDraggingTaskId === t.id) {
+          setMobileDraggingTaskId(null);
+          setMobileDragOffsetY(0);
+          return;
+        }
+        if (!mobileSwipeRef.current.tracking) return;
+        const touch = e.changedTouches[0];
+        const dx = touch.clientX - mobileSwipeRef.current.x;
+        const dy = Math.abs(touch.clientY - mobileSwipeRef.current.y);
+        mobileSwipeRef.current.tracking = false;
+        if (dy > 60) return;
+        if (dx < -50) setMobileRevealedTaskId(t.id);
+        else if (dx > 50) {
+          if (mobileRevealedTaskId === t.id) setMobileRevealedTaskId(null);
+          else if (mobileSwipeRef.current.x < 36) mobileGoBack();
+        }
+      },
+    };
+  }
+
+  function renderMobileTaskRow(t) {
+    const done = t.status === "Hecho";
+    const completing = mobileCompletingIds.has(t.id);
+    const revealed = mobileRevealedTaskId === t.id;
+    return (
+      <div
+        key={t.id}
+        data-task-id={t.id}
+        className={`m-task-row ${revealed ? "m-task-row--revealed" : ""} ${mobileDraggingTaskId === t.id ? "m-task-row--dragging" : ""}`}
+        style={mobileDraggingTaskId === t.id ? { transform: `translateY(${mobileDragOffsetY}px)` } : undefined}
+        {...taskRowSwipeHandlers(t)}
+      >
+        <button className="m-check" onClick={() => mobileToggleDone(t.id, done)}>
+          {done || completing ? <CheckCircle2 size={20} color="var(--good)" /> : <Circle size={20} color="var(--text-faint)" />}
+        </button>
+        <div className="m-task-main">
+          {editingTitleId === t.id ? (
+            <input
+              autoFocus
+              className="m-task-title-input"
+              defaultValue={t.title}
+              onBlur={(e) => { commitTaskTitle(t.id, e.target.value); setEditingTitleId(null); }}
+              onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") setEditingTitleId(null); }}
+            />
+          ) : (
+            <span className={`m-task-title ${done ? "m-task-title--done" : ""}`} onClick={() => setEditingTitleId(t.id)}>{t.title}</span>
+          )}
+          {editingNoteId === t.id ? (
+            <input
+              autoFocus
+              className="m-task-note-input"
+              defaultValue={t.note}
+              onBlur={(e) => { setNote(t.id, e.target.value); setEditingNoteId(null); }}
+              onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") setEditingNoteId(null); }}
+            />
+          ) : t.note ? (
+            <span className="m-task-note" onClick={() => setEditingNoteId(t.id)}>{t.note}</span>
+          ) : null}
+        </div>
+        {revealed ? (
+          <button className="m-row-delete" onClick={() => setDeleteTarget({ type: "task", id: t.id })}>
+            <Trash2 size={16} /> Eliminar
+          </button>
+        ) : (
+          renderMobileTaskIcons(t)
+        )}
+      </div>
+    );
+  }
+
   function renderMobileAreasScreen() {
     const q = mobileSearch.trim().toLowerCase();
     const matchedAreas = q ? areas.filter((a) => a.name.toLowerCase().includes(q)) : [];
@@ -1586,11 +1691,11 @@ export default function TaskTracker() {
             </button>
             <span style={{ flex: 1 }} />
             <button className={`m-hide-done ${hideCompleted ? "m-hide-done--active" : ""}`} onClick={() => setHideCompleted((v) => !v)} title="Ocultar hechas">
-              {hideCompleted ? <CheckCircle2 size={13} /> : <Circle size={13} />}
+              {hideCompleted ? <CheckCircle2 size={18} /> : <Circle size={18} />}
             </button>
-            <button className="iconbtn icon-only" onClick={() => setShowSettingsPanel(true)} title="Configuración"><Settings size={14} /></button>
-            <button className="iconbtn icon-only" onClick={() => setShowEncSettings(true)} title="Cifrado">
-              {isEncrypted ? <Lock size={14} /> : <Unlock size={14} />}
+            <button className="iconbtn icon-only m-top-iconbtn" onClick={() => setShowSettingsPanel(true)} title="Configuración"><Settings size={19} /></button>
+            <button className="iconbtn icon-only m-top-iconbtn" onClick={() => setShowEncSettings(true)} title="Cifrado">
+              {isEncrypted ? <Lock size={19} /> : <Unlock size={19} />}
             </button>
           </div>
           <div className="m-search-row">
@@ -1628,25 +1733,7 @@ export default function TaskTracker() {
           ) : mobileExpandedFilter ? (
             <>
               {filteredTasks.length === 0 && <div className="m-empty-hint">Nada por acá.</div>}
-              {filteredTasks.map((t) => {
-                const a = areaMap[t.areaId];
-                const done = t.status === "Hecho";
-                const completing = mobileCompletingIds.has(t.id);
-                return (
-                  <div key={t.id} className="m-task-row">
-                    <button className="m-check" onClick={() => mobileToggleDone(t.id, done)}>
-                      {done || completing ? <CheckCircle2 size={20} color="var(--good)" /> : <Circle size={20} color="var(--text-faint)" />}
-                    </button>
-                    <button className="m-task-main" onClick={() => openMobileTask(t.id, t.areaId)}>
-                      <span className={`m-task-title ${done ? "m-task-title--done" : ""}`}>{t.title}</span>
-                      <span className="m-task-note m-task-note--empty">
-                        {a?.name}{isOverdue(t.date, t.status) ? " · vencida" : ""}
-                      </span>
-                    </button>
-                    {renderMobileTaskIcons(t)}
-                  </div>
-                );
-              })}
+              {filteredTasks.map(renderMobileTaskRow)}
             </>
           ) : (
             <>
@@ -1670,7 +1757,7 @@ export default function TaskTracker() {
                       if (e.key === "Enter") { const n = mobileNewAreaName.trim(); if (n) ensureArea(n); setMobileNewAreaName(""); setMobileAddingArea(false); }
                       if (e.key === "Escape") { setMobileNewAreaName(""); setMobileAddingArea(false); }
                     }}
-                    onBlur={() => { const n = mobileNewAreaName.trim(); if (n) ensureArea(n); setMobileNewAreaName(""); setMobileAddingArea(false); }}
+                    onBlur={() => { setMobileNewAreaName(""); setMobileAddingArea(false); }}
                   />
                 </div>
               ) : (
@@ -1699,117 +1786,9 @@ export default function TaskTracker() {
     const projects = area.projects || [];
     const q = mobileSearch.trim().toLowerCase();
     const matchesQuery = (t) => !q || t.title.toLowerCase().includes(q) || (t.note || "").toLowerCase().includes(q);
-    const matchesVisibility = (t) => matchesQuery(t) && (!hideCompleted || t.status !== "Hecho");
+    const matchesVisibility = (t) => matchesQuery(t) && (!hideCompleted || t.status !== "Hecho" || mobileCompletingIds.has(t.id));
     const tasksOf = (projectId) => tasks.filter((t) => t.areaId === area.id && t.projectId === projectId).filter(matchesVisibility);
     const generalTasks = tasks.filter((t) => t.areaId === area.id && !t.projectId).filter(matchesVisibility);
-
-    function taskRowSwipeHandlers(t) {
-      return {
-        onTouchStart: (e) => {
-          e.stopPropagation();
-          const touch = e.touches[0];
-          mobileSwipeRef.current = { x: touch.clientX, y: touch.clientY, tracking: true, taskId: t.id };
-          mobileLongPressRef.current.x = touch.clientX;
-          mobileLongPressRef.current.y = touch.clientY;
-          mobileLongPressRef.current.taskId = t.id;
-          mobileLongPressRef.current.lastOverId = t.id;
-          clearTimeout(mobileLongPressRef.current.timer);
-          mobileLongPressRef.current.timer = setTimeout(() => {
-            mobileSwipeRef.current.tracking = false; // long-press claims the gesture; cancel swipe/back
-            setMobileDraggingTaskId(t.id);
-            setMobileDragOffsetY(0);
-          }, 450);
-        },
-        onTouchMove: (e) => {
-          e.stopPropagation();
-          const touch = e.touches[0];
-          if (mobileDraggingTaskId === t.id) {
-            setMobileDragOffsetY(touch.clientY - mobileLongPressRef.current.y);
-            const el = document.elementFromPoint(touch.clientX, touch.clientY);
-            const rowEl = el && el.closest && el.closest("[data-task-id]");
-            const overId = rowEl && rowEl.getAttribute("data-task-id");
-            if (overId && overId !== mobileLongPressRef.current.lastOverId) {
-              reorderTask(t.id, overId);
-              mobileLongPressRef.current.lastOverId = overId;
-            }
-            return;
-          }
-          const dx = Math.abs(touch.clientX - mobileLongPressRef.current.x);
-          const dy = Math.abs(touch.clientY - mobileLongPressRef.current.y);
-          if (dx > 10 || dy > 10) clearTimeout(mobileLongPressRef.current.timer);
-        },
-        onTouchEnd: (e) => {
-          e.stopPropagation();
-          clearTimeout(mobileLongPressRef.current.timer);
-          if (mobileDraggingTaskId === t.id) {
-            setMobileDraggingTaskId(null);
-            setMobileDragOffsetY(0);
-            return;
-          }
-          if (!mobileSwipeRef.current.tracking) return;
-          const touch = e.changedTouches[0];
-          const dx = touch.clientX - mobileSwipeRef.current.x;
-          const dy = Math.abs(touch.clientY - mobileSwipeRef.current.y);
-          mobileSwipeRef.current.tracking = false;
-          if (dy > 60) return;
-          if (dx < -50) setMobileRevealedTaskId(t.id);
-          else if (dx > 50) {
-            if (mobileRevealedTaskId === t.id) setMobileRevealedTaskId(null);
-            else if (mobileSwipeRef.current.x < 36) mobileGoBack();
-          }
-        },
-      };
-    }
-
-    function renderTaskRow(t) {
-      const done = t.status === "Hecho";
-      const completing = mobileCompletingIds.has(t.id);
-      const revealed = mobileRevealedTaskId === t.id;
-      return (
-        <div
-          key={t.id}
-          data-task-id={t.id}
-          className={`m-task-row ${revealed ? "m-task-row--revealed" : ""} ${mobileDraggingTaskId === t.id ? "m-task-row--dragging" : ""}`}
-          style={mobileDraggingTaskId === t.id ? { transform: `translateY(${mobileDragOffsetY}px)` } : undefined}
-          {...taskRowSwipeHandlers(t)}
-        >
-          <button className="m-check" onClick={() => mobileToggleDone(t.id, done)}>
-            {done || completing ? <CheckCircle2 size={20} color="var(--good)" /> : <Circle size={20} color="var(--text-faint)" />}
-          </button>
-          <div className="m-task-main">
-            {editingTitleId === t.id ? (
-              <input
-                autoFocus
-                className="m-task-title-input"
-                defaultValue={t.title}
-                onBlur={(e) => { commitTaskTitle(t.id, e.target.value); setEditingTitleId(null); }}
-                onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") setEditingTitleId(null); }}
-              />
-            ) : (
-              <span className={`m-task-title ${done ? "m-task-title--done" : ""}`} onClick={() => setEditingTitleId(t.id)}>{t.title}</span>
-            )}
-            {editingNoteId === t.id ? (
-              <input
-                autoFocus
-                className="m-task-note-input"
-                defaultValue={t.note}
-                onBlur={(e) => { setNote(t.id, e.target.value); setEditingNoteId(null); }}
-                onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") setEditingNoteId(null); }}
-              />
-            ) : t.note ? (
-              <span className="m-task-note" onClick={() => setEditingNoteId(t.id)}>{t.note}</span>
-            ) : null}
-          </div>
-          {revealed ? (
-            <button className="m-row-delete" onClick={() => setDeleteTarget({ type: "task", id: t.id })}>
-              <Trash2 size={16} /> Eliminar
-            </button>
-          ) : (
-            renderMobileTaskIcons(t)
-          )}
-        </div>
-      );
-    }
 
     return (
       <div className="m-screen" {...mobileSwipeHandlers(true)}>
@@ -1832,18 +1811,18 @@ export default function TaskTracker() {
         <div className="m-list" onClick={() => mobileRevealedTaskId && setMobileRevealedTaskId(null)}>
           {generalTasks.length > 0 && (
             <div className="m-project-block">
-              {generalTasks.map(renderTaskRow)}
+              {generalTasks.map(renderMobileTaskRow)}
             </div>
           )}
 
           {projects.map((p) => (
             <div key={p.id} className="m-project-block">
               <div className="m-project-header">
-                <span className="m-project-dot" />
-                <span className="m-project-name">{p.name.toUpperCase()}</span>
+                <span className="m-project-dot" style={{ background: area.color }} />
+                <span className="m-project-name" style={{ color: area.color }}>{p.name.toUpperCase()}</span>
                 <span className="m-project-count">{tasksOf(p.id).length}</span>
               </div>
-              {tasksOf(p.id).map(renderTaskRow)}
+              {tasksOf(p.id).map(renderMobileTaskRow)}
             </div>
           ))}
         </div>
@@ -1861,7 +1840,7 @@ export default function TaskTracker() {
                     if (e.key === "Enter") { createProjectWithName(area.id, mobileNewProjectName); setMobileNewProjectName(""); setMobileAddingProjectAreaId(null); }
                     if (e.key === "Escape") { setMobileNewProjectName(""); setMobileAddingProjectAreaId(null); }
                   }}
-                  onBlur={() => { createProjectWithName(area.id, mobileNewProjectName); setMobileNewProjectName(""); setMobileAddingProjectAreaId(null); }}
+                  onBlur={() => { setMobileNewProjectName(""); setMobileAddingProjectAreaId(null); }}
                 />
               </div>
             ) : (
@@ -1901,11 +1880,14 @@ export default function TaskTracker() {
         </div>
 
         <div className="m-task-detail">
-          <input
+          <textarea
             className="m-task-detail-title"
             defaultValue={t.title}
+            rows={1}
+            ref={(el) => { if (el) { el.style.height = "auto"; el.style.height = el.scrollHeight + "px"; } }}
+            onInput={(e) => { e.target.style.height = "auto"; e.target.style.height = e.target.scrollHeight + "px"; }}
             onBlur={(e) => commitTaskTitle(t.id, e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); e.target.blur(); } }}
           />
           <textarea
             className="m-task-detail-note"
@@ -2006,7 +1988,6 @@ export default function TaskTracker() {
             value={mobileQuickAddText}
             onChange={(e) => setMobileQuickAddText(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
-            onBlur={submit}
           />
           <button className="m-quickadd-send" onClick={submit}><Plus size={18} /></button>
         </div>
@@ -2642,7 +2623,7 @@ export default function TaskTracker() {
 
           /* ---- mobile drill-down screens (areas / área / nota) ---- */
           .m-screen { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-          .m-list { flex: 1; overflow-y: auto; padding: 10px 12px 16px; }
+          .m-list { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 10px 12px 16px; display: flex; flex-direction: column; }
           .m-empty-hint { padding: 30px 10px; text-align: center; color: var(--text-faint); font-size: 13px; }
 
           .m-topbar { padding: 12px 14px 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
@@ -2689,7 +2670,7 @@ export default function TaskTracker() {
 
           .m-account-row {
             display: flex; align-items: center; justify-content: space-between; gap: 10px;
-            margin-top: 18px; padding: 14px; border-top: 1px solid var(--border);
+            margin-top: auto; padding: 12px 14px 0; border-top: 1px solid var(--border);
           }
           .m-account-name { font-size: 13px; color: var(--text-dim); font-weight: 600; }
           .m-account-sub { font-size: 11px; color: var(--text-faint); margin-top: 2px; }
@@ -2705,13 +2686,14 @@ export default function TaskTracker() {
           .m-header-count { font-size: 12px; color: var(--text-faint); }
           .m-header-crumb { flex: 1; font-size: 13px; color: var(--text-dim); }
           .m-header-delete { background: none; border: none; color: var(--text-faint); padding: 4px; }
-          .m-hide-done { background: var(--surface-2); border: 1px solid var(--border); color: var(--text-faint); border-radius: 7px; padding: 6px 9px; display: flex; }
+          .m-hide-done { background: var(--surface-2); border: 1px solid var(--border); color: var(--text-faint); border-radius: 8px; padding: 8px 11px; display: flex; }
+          .m-top-iconbtn { padding: 8px 10px !important; }
           .m-hide-done--active { color: var(--amber); border-color: rgba(232,163,61,0.4); }
 
           .m-project-block { margin-bottom: 18px; }
           .m-project-header { display: flex; align-items: center; gap: 8px; padding: 4px 4px 8px; }
-          .m-project-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--blue); flex-shrink: 0; }
-          .m-project-name { flex: 1; font-size: 14.5px; font-weight: 700; color: var(--blue); letter-spacing: 0.03em; }
+          .m-project-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+          .m-project-name { flex: 1; font-size: 14.5px; font-weight: 700; letter-spacing: 0.03em; }
           .m-project-count { font-size: 11px; color: var(--text-faint); background: var(--surface-2); padding: 2px 7px; border-radius: 999px; }
 
           .m-task-row {
@@ -2745,10 +2727,11 @@ export default function TaskTracker() {
 
           .m-sticky-footer { padding: 10px 12px; border-top: 1px solid var(--border); flex-shrink: 0; }
 
-          .m-task-detail { flex: 1; overflow-y: auto; padding: 16px 16px 30px; }
+          .m-task-detail { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 16px 16px 30px; }
           .m-task-detail-title {
             width: 100%; background: none; border: none; outline: none; color: var(--text);
-            font-size: 20px; font-weight: 700; margin-bottom: 12px;
+            font-size: 20px; font-weight: 700; margin-bottom: 12px; font-family: inherit;
+            resize: none; overflow: hidden; line-height: 1.35;
           }
           .m-task-detail-note {
             width: 100%; min-height: 64px; background: var(--surface); border: 1px solid var(--border);

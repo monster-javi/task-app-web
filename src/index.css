@@ -1,6 +1,6 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
-html, body, #root { height: 100%; }
-body { background: #0c0e11; }
+html, body, #root { height: 100%; overflow: hidden; overscroll-behavior: none; }
+body { background: #0c0e11; position: fixed; inset: 0; width: 100%; }
 
 :root {
   --bg: #0c0e11;
