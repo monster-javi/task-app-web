@@ -5,7 +5,7 @@ import {
   Search, Bell, ChevronDown, ChevronRight, ChevronLeft,
   Trash2, Loader2, Plus, Circle, CircleDot, CheckCircle2, Pencil, ListChecks,
   List as ListIcon, Flag, Calendar as CalendarIcon, ChevronsDown, ChevronsUp, X,
-  RefreshCw, Cloud, Download, Upload, Settings, Lock, Unlock, Info,
+  RefreshCw, Cloud, CloudOff, Download, Upload, Settings, Lock, Unlock, Info,
 } from "lucide-react";
 
 // ---------- Supabase ----------
@@ -568,6 +568,9 @@ export default function TaskTracker() {
   const [mobileRevealedTaskId, setMobileRevealedTaskId] = useState(null);
   const [mobileQuickAddProjectId, setMobileQuickAddProjectId] = useState(null);
   const [mobileDraggingTaskId, setMobileDraggingTaskId] = useState(null);
+  const [mobileCollapsedProjects, setMobileCollapsedProjects] = useState(() => new Set());
+  const [mobileInlineAddKey, setMobileInlineAddKey] = useState(null); // "areaId:projectId" or "areaId:general"
+  const [mobileInlineAddText, setMobileInlineAddText] = useState("");
   const [mobileDragOffsetY, setMobileDragOffsetY] = useState(0);
   const mobileLongPressRef = useRef({ timer: null, x: 0, y: 0, taskId: null, lastOverId: null });
   const statusClickGuardRef = useRef({ id: null, time: 0 });
@@ -578,6 +581,8 @@ export default function TaskTracker() {
   const [bootStatus, setBootStatus] = useState("checking-session"); // checking-session | auth | loading | ready
   const [lastSyncAt, setLastSyncAt] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [syncError, setSyncError] = useState(false);
+  const saveRetryRef = useRef({ attempt: 0, timer: null });
   const hasLoadedRef = useRef(false);
   const lastAppliedUpdatedAtRef = useRef(0);
 
@@ -886,8 +891,14 @@ export default function TaskTracker() {
   // ---- autosave (debounced); encrypts client-side first only if encryption is on ----
   useEffect(() => {
     if (!session || !hasLoadedRef.current || bootStatus !== "ready") return;
-    const id = setTimeout(async () => {
-      setSaving(true);
+    const id = setTimeout(() => { saveNow(); }, 600);
+    return () => clearTimeout(id);
+  }, [areas, tasks, bootStatus, session]);
+
+  async function saveNow() {
+    clearTimeout(saveRetryRef.current.timer);
+    setSaving(true);
+    try {
       const updatedAt = new Date().toISOString();
       // Mark this write as "ours" *before* it goes out — the realtime echo for
       // it can arrive over the websocket faster than this same request's own
@@ -902,14 +913,24 @@ export default function TaskTracker() {
         .upsert({ user_id: session.user.id, data: dataToSave, updated_at: updatedAt }, { onConflict: "user_id" })
         .select("updated_at")
         .single();
+      if (error) throw error;
+      lastAppliedUpdatedAtRef.current = new Date(row.updated_at).getTime();
+      setLastSyncAt(new Date(row.updated_at).getTime());
+      setSyncError(false);
+      saveRetryRef.current.attempt = 0;
+    } catch (err) {
+      console.error("autosave failed", err);
+      setSyncError(true);
+      // A failed save must never be silently lost — keep retrying with
+      // backoff (5s, 10s, 20s... capped at 30s) until it goes through.
+      const attempt = saveRetryRef.current.attempt + 1;
+      saveRetryRef.current.attempt = attempt;
+      const delay = Math.min(30000, 5000 * attempt);
+      saveRetryRef.current.timer = setTimeout(() => { saveNow(); }, delay);
+    } finally {
       setSaving(false);
-      if (!error && row) {
-        lastAppliedUpdatedAtRef.current = new Date(row.updated_at).getTime();
-        setLastSyncAt(new Date(row.updated_at).getTime());
-      }
-    }, 600);
-    return () => clearTimeout(id);
-  }, [areas, tasks, bootStatus, session]);
+    }
+  }
 
   function withTimeout(promise, ms = 12000, message = "Se agotó el tiempo de espera — revisá tu conexión a internet.") {
     return Promise.race([
@@ -1350,6 +1371,19 @@ export default function TaskTracker() {
     showToast("Tarea creada");
   }
 
+  function commitTitleAndAddNext(task, value) {
+    const clean = value.trim();
+    const newId = uid();
+    setTasks((prev) => {
+      const list = prev.map((t) => (t.id === task.id ? { ...t, title: clean || t.title } : t));
+      const idx = list.findIndex((t) => t.id === task.id);
+      const newTask = { id: newId, areaId: task.areaId, projectId: task.projectId, title: "", note: "", status: "Por hacer", priority: "Media", date: null };
+      list.splice(idx + 1, 0, newTask);
+      return list;
+    });
+    setEditingTitleId(newId);
+  }
+
   function startRenameProject(areaId, project) {
     setRenamingProjectId(project.id);
     setRenameProjectAreaId(areaId);
@@ -1641,7 +1675,10 @@ export default function TaskTracker() {
               className="m-task-title-input"
               defaultValue={t.title}
               onBlur={(e) => { commitTaskTitle(t.id, e.target.value); setEditingTitleId(null); }}
-              onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") setEditingTitleId(null); }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); commitTitleAndAddNext(t, e.target.value); }
+                if (e.key === "Escape") setEditingTitleId(null);
+              }}
             />
           ) : (
             <span className={`m-task-title ${done ? "m-task-title--done" : ""}`} onClick={() => setEditingTitleId(t.id)}>{t.title}</span>
@@ -1697,6 +1734,11 @@ export default function TaskTracker() {
             <button className="iconbtn icon-only m-top-iconbtn" onClick={() => setShowEncSettings(true)} title="Cifrado">
               {isEncrypted ? <Lock size={19} /> : <Unlock size={19} />}
             </button>
+            {syncError && (
+              <button className="iconbtn icon-only m-top-iconbtn sync-indicator--error" onClick={saveNow} title="No se pudo guardar — tocá para reintentar">
+                <CloudOff size={19} />
+              </button>
+            )}
           </div>
           <div className="m-search-row">
             <div className="m-search">
@@ -1738,12 +1780,26 @@ export default function TaskTracker() {
           ) : (
             <>
               {areas.map((a) => (
-                <button key={a.id} className="m-area-card" onClick={() => openMobileArea(a.id)}>
-                  <span className="m-area-bar" style={{ background: a.color }} />
-                  <span className="m-area-name">{a.name.toUpperCase()}</span>
-                  <span className="m-area-count">{mobileCountFor(a.id)} pendientes</span>
-                  <ChevronRight size={16} className="m-area-chevron" />
-                </button>
+                renamingAreaId === a.id ? (
+                  <div key={a.id} className="m-area-card m-area-card--renaming">
+                    <span className="m-area-bar" style={{ background: a.color }} />
+                    <input
+                      ref={renameInputRef}
+                      className="m-inline-rename-input"
+                      value={renameValue}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRenamingAreaId(null); }}
+                      onBlur={commitRename}
+                    />
+                  </div>
+                ) : (
+                  <button key={a.id} className="m-area-card" onClick={() => openMobileArea(a.id)} {...longPressToRename(() => startRename(a))}>
+                    <span className="m-area-bar" style={{ background: a.color }} />
+                    <span className="m-area-name">{a.name.toUpperCase()}</span>
+                    <span className="m-area-count">{mobileCountFor(a.id)} pendientes</span>
+                    <ChevronRight size={16} className="m-area-chevron" />
+                  </button>
+                )
               ))}
 
               {mobileAddingArea ? (
@@ -1780,6 +1836,59 @@ export default function TaskTracker() {
     );
   }
 
+  function longPressToRename(onLongPress) {
+    const state = { timer: null, x: 0, y: 0, fired: false };
+    return {
+      onTouchStart: (e) => {
+        const touch = e.touches[0];
+        state.x = touch.clientX; state.y = touch.clientY; state.fired = false;
+        state.timer = setTimeout(() => { state.fired = true; onLongPress(); }, 500);
+      },
+      onTouchMove: (e) => {
+        const touch = e.touches[0];
+        if (Math.abs(touch.clientX - state.x) > 10 || Math.abs(touch.clientY - state.y) > 10) clearTimeout(state.timer);
+      },
+      onTouchEnd: () => clearTimeout(state.timer),
+      onClickCapture: (e) => { if (state.fired) { e.preventDefault(); e.stopPropagation(); state.fired = false; } },
+    };
+  }
+
+  function toggleMobileProjectCollapse(projectId) {
+    setMobileCollapsedProjects((prev) => {
+      const next = new Set(prev);
+      if (next.has(projectId)) next.delete(projectId); else next.add(projectId);
+      return next;
+    });
+  }
+
+  function renderMobileInlineAdd(areaId, projectId) {
+    const key = `${areaId}:${projectId || "general"}`;
+    if (mobileInlineAddKey !== key) {
+      return <div className="m-inline-add-zone" onClick={() => { setMobileInlineAddKey(key); setMobileInlineAddText(""); }} />;
+    }
+    function submitAndContinue() {
+      const clean = mobileInlineAddText.trim();
+      if (!clean) { setMobileInlineAddKey(null); return; }
+      addQuickTask(areaId, projectId, clean);
+      setMobileInlineAddText("");
+    }
+    return (
+      <div className="m-inline-add-zone m-inline-add-zone--active">
+        <input
+          autoFocus
+          placeholder="Nueva tarea..."
+          value={mobileInlineAddText}
+          onChange={(e) => setMobileInlineAddText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") { e.preventDefault(); submitAndContinue(); }
+            if (e.key === "Escape") setMobileInlineAddKey(null);
+          }}
+          onBlur={() => setMobileInlineAddKey(null)}
+        />
+      </div>
+    );
+  }
+
   function renderMobileAreaScreen() {
     const area = areaMap[mobileAreaId];
     if (!area) { setMobileScreen("areas"); return null; }
@@ -1809,22 +1918,49 @@ export default function TaskTracker() {
         </div>
 
         <div className="m-list" onClick={() => mobileRevealedTaskId && setMobileRevealedTaskId(null)}>
-          {generalTasks.length > 0 && (
-            <div className="m-project-block">
-              {generalTasks.map(renderMobileTaskRow)}
-            </div>
-          )}
+          <div className="m-project-block">
+            {generalTasks.map(renderMobileTaskRow)}
+            {renderMobileInlineAdd(area.id, null)}
+          </div>
 
-          {projects.map((p) => (
-            <div key={p.id} className="m-project-block">
-              <div className="m-project-header">
-                <span className="m-project-dot" style={{ background: area.color }} />
-                <span className="m-project-name" style={{ color: area.color }}>{p.name.toUpperCase()}</span>
-                <span className="m-project-count">{tasksOf(p.id).length}</span>
+          {projects.map((p) => {
+            const collapsed = mobileCollapsedProjects.has(p.id);
+            const isRenaming = renamingProjectId === p.id && renameProjectAreaId === area.id;
+            return (
+              <div key={p.id} className="m-project-block">
+                {isRenaming ? (
+                  <div className="m-project-header">
+                    <span className="m-project-dot" style={{ background: area.color }} />
+                    <input
+                      className="m-inline-rename-input m-inline-rename-input--project"
+                      value={renameProjectValue}
+                      onChange={(e) => setRenameProjectValue(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") commitRenameProject(); if (e.key === "Escape") setRenamingProjectId(null); }}
+                      onBlur={commitRenameProject}
+                      autoFocus
+                    />
+                  </div>
+                ) : (
+                  <div
+                    className="m-project-header"
+                    onClick={() => toggleMobileProjectCollapse(p.id)}
+                    {...longPressToRename(() => startRenameProject(area.id, p))}
+                  >
+                    <ChevronRight size={13} className={`m-project-chevron ${collapsed ? "" : "m-project-chevron--open"}`} />
+                    <span className="m-project-dot" style={{ background: area.color }} />
+                    <span className="m-project-name" style={{ color: area.color }}>{p.name.toUpperCase()}</span>
+                    <span className="m-project-count">{tasksOf(p.id).length}</span>
+                  </div>
+                )}
+                {!collapsed && (
+                  <>
+                    {tasksOf(p.id).map(renderMobileTaskRow)}
+                    {renderMobileInlineAdd(area.id, p.id)}
+                  </>
+                )}
               </div>
-              {tasksOf(p.id).map(renderMobileTaskRow)}
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         {!isGeneralArea(area) && (
@@ -2034,7 +2170,7 @@ export default function TaskTracker() {
                       defaultValue={t.title}
                       onBlur={(e) => commitTaskTitle(t.id, e.target.value)}
                       onKeyDown={(e) => {
-                        if (e.key === "Enter") e.target.blur();
+                        if (e.key === "Enter") { e.preventDefault(); commitTitleAndAddNext(t, e.target.value); }
                         if (e.key === "Escape") setEditingTitleId(null);
                       }}
                     />
@@ -2346,6 +2482,7 @@ export default function TaskTracker() {
         .iconbtn--active { color: var(--amber); border-color: rgba(232,163,61,0.4); background: rgba(232,163,61,0.08); }
         .icon-only { padding: 6px 7px; }
         .sync-indicator { cursor: default; color: var(--text-dim); }
+        .sync-indicator--error { color: var(--alta) !important; border-color: rgba(240,85,75,0.4) !important; }
         .sync-indicator:hover { color: var(--text-dim); border-color: var(--border); }
 
         .bell-wrap { position: relative; display: inline-flex; }
@@ -2691,10 +2828,26 @@ export default function TaskTracker() {
           .m-hide-done--active { color: var(--amber); border-color: rgba(232,163,61,0.4); }
 
           .m-project-block { margin-bottom: 18px; }
-          .m-project-header { display: flex; align-items: center; gap: 8px; padding: 4px 4px 8px; }
+          .m-project-header { display: flex; align-items: center; gap: 8px; padding: 8px 4px; cursor: pointer; }
+          .m-project-chevron { color: var(--text-faint); transition: transform 0.15s; flex-shrink: 0; }
+          .m-project-chevron--open { transform: rotate(90deg); }
           .m-project-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
           .m-project-name { flex: 1; font-size: 14.5px; font-weight: 700; letter-spacing: 0.03em; }
           .m-project-count { font-size: 11px; color: var(--text-faint); background: var(--surface-2); padding: 2px 7px; border-radius: 999px; }
+
+          .m-inline-add-zone { min-height: 34px; cursor: text; }
+          .m-inline-add-zone--active { min-height: 0; padding: 6px 4px; }
+          .m-inline-add-zone--active input {
+            width: 100%; background: var(--surface-2); border: 1px solid rgba(232,163,61,0.4); border-radius: 8px;
+            outline: none; color: var(--text); font-size: 15px; padding: 9px 11px; font-family: inherit;
+          }
+
+          .m-area-card--renaming { background: var(--surface-2); }
+          .m-inline-rename-input {
+            flex: 1; background: none; border: none; border-bottom: 1px solid var(--amber); outline: none;
+            color: var(--text); font-size: 15.5px; font-weight: 700; font-family: inherit; padding: 2px 0;
+          }
+          .m-inline-rename-input--project { font-size: 14.5px; }
 
           .m-task-row {
             display: flex; align-items: center; gap: 16px; padding: 12px 4px;
@@ -3015,8 +3168,13 @@ export default function TaskTracker() {
               </>
             )}
           </span>
-          <span className="iconbtn icon-only sync-indicator" title={saving ? "Guardando..." : lastSyncAt ? `Sincronizado — ${new Date(lastSyncAt).toLocaleTimeString("es-AR")}` : "Conectado a Supabase"}>
-            {saving ? <RefreshCw size={14} className="spin" /> : <Cloud size={14} />}
+          <span
+            className={`iconbtn icon-only sync-indicator ${syncError ? "sync-indicator--error" : ""}`}
+            onClick={() => { if (syncError) saveNow(); }}
+            style={syncError ? { cursor: "pointer" } : undefined}
+            title={syncError ? "No se pudo guardar — tocá para reintentar" : saving ? "Guardando..." : lastSyncAt ? `Sincronizado — ${new Date(lastSyncAt).toLocaleTimeString("es-AR")}` : "Conectado a Supabase"}
+          >
+            {syncError ? <CloudOff size={14} /> : saving ? <RefreshCw size={14} className="spin" /> : <Cloud size={14} />}
           </span>
           <button className="iconbtn" onClick={exportData} title="Descargar un backup en .json">
             <Download size={13} /> Exportar
