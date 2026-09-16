@@ -643,6 +643,7 @@ export default function TaskTracker() {
   const [editingNoteId, setEditingNoteId] = useState(null);
   const [editingTitleId, setEditingTitleId] = useState(null);
   const freshTaskIdRef = useRef(null);
+  const titleKeyHandledRef = useRef(null);
 
   const [manualTitle, setManualTitle] = useState("");
   const [manualArea, setManualArea] = useState("");
@@ -1249,7 +1250,11 @@ export default function TaskTracker() {
         priority: it.priority,
         date: it.date,
       }));
-      setTasks((prev) => [...newTasks, ...prev]);
+      setTasks((prev) => {
+        let list = prev;
+        for (const nt of newTasks) list = insertAtEndOfGroup(list, nt);
+        return list;
+      });
       showToast(`${newTasks.length} tarea${newTasks.length === 1 ? "" : "s"} creada${newTasks.length === 1 ? "" : "s"}`);
       return workingAreas;
     });
@@ -1410,12 +1415,20 @@ export default function TaskTracker() {
     setCollapsedProjects((prev) => ({ ...prev, [id]: !prev[id] }));
   }
 
+  function insertAtEndOfGroup(list, newTask) {
+    let lastIdx = -1;
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].areaId === newTask.areaId && list[i].projectId === newTask.projectId) lastIdx = i;
+    }
+    const copy = [...list];
+    copy.splice(lastIdx + 1, 0, newTask);
+    return copy;
+  }
+
   function addQuickTask(areaId, projectId, title) {
     if (!title.trim()) return;
-    setTasks((prev) => [
-      { id: uid(), areaId, projectId: projectId || null, title: title.trim(), note: "", status: "Por hacer", priority: "Media", date: null },
-      ...prev,
-    ]);
+    const newTask = { id: uid(), areaId, projectId: projectId || null, title: title.trim(), note: "", status: "Por hacer", priority: "Media", date: null };
+    setTasks((prev) => insertAtEndOfGroup(prev, newTask));
     showToast("Tarea creada");
   }
 
@@ -1424,10 +1437,8 @@ export default function TaskTracker() {
     const newId = uid();
     setTasks((prev) => {
       const list = prev.map((t) => (t.id === task.id ? { ...t, title: clean || t.title } : t));
-      const idx = list.findIndex((t) => t.id === task.id);
       const newTask = { id: newId, areaId: task.areaId, projectId: task.projectId, title: "", note: "", status: "Por hacer", priority: "Media", date: null };
-      list.splice(idx + 1, 0, newTask);
-      return list;
+      return insertAtEndOfGroup(list, newTask);
     });
     setEditingTitleId(newId);
     freshTaskIdRef.current = newId;
@@ -1548,7 +1559,7 @@ export default function TaskTracker() {
   function colGroupFor(showArea) {
     return (
       <colgroup>
-        <col style={{ width: "28px" }} />
+        <col style={{ width: "42px" }} />
         <col style={{ width: showArea ? "27%" : "33%" }} />
         {showArea && <col style={{ width: "18%" }} />}
         <col style={{ width: showArea ? "18%" : "26%" }} />
@@ -1732,10 +1743,13 @@ export default function TaskTracker() {
               autoFocus
               className="m-task-title-input"
               defaultValue={t.title}
-              onBlur={(e) => { commitTaskTitle(t.id, e.target.value); setEditingTitleId(null); }}
+              onBlur={(e) => {
+                if (titleKeyHandledRef.current === t.id) { titleKeyHandledRef.current = null; return; }
+                commitTitleAndAddNext(t, e.target.value);
+              }}
               onKeyDown={(e) => {
-                if (e.key === "Enter") { e.preventDefault(); commitTitleAndAddNext(t, e.target.value); }
-                if (e.key === "Escape") handleTitleEscape(t.id);
+                if (e.key === "Enter") { e.preventDefault(); titleKeyHandledRef.current = t.id; commitTitleAndAddNext(t, e.target.value); }
+                if (e.key === "Escape") { titleKeyHandledRef.current = t.id; handleTitleEscape(t.id); }
               }}
             />
           ) : (
@@ -1975,14 +1989,20 @@ export default function TaskTracker() {
           <button className="m-add-btn" onClick={openMobileQuickAdd} title="Nueva nota"><Plus size={18} /></button>
         </div>
 
-        <div className="m-list" onClick={() => mobileRevealedTaskId && setMobileRevealedTaskId(null)}>
-          <div className="m-project-block">
-            {generalTasks.map(renderMobileTaskRow)}
-            {renderMobileInlineAdd(area.id, null)}
-          </div>
-
+        <div
+          className="m-list"
+          onClick={(e) => {
+            if (mobileRevealedTaskId) setMobileRevealedTaskId(null);
+            const totalTasks = generalTasks.length + projects.reduce((n, p) => n + tasksOf(p.id).length, 0);
+            if (totalTasks === 0 && e.target === e.currentTarget) {
+              setMobileInlineAddKey(`${area.id}:general`);
+              setMobileInlineAddText("");
+            }
+          }}
+        >
           {projects.map((p) => {
-            const collapsed = mobileCollapsedProjects.has(p.id);
+            const projectTaskCount = tasksOf(p.id).length;
+            const collapsed = projectTaskCount > 0 && mobileCollapsedProjects.has(p.id);
             const isRenaming = renamingProjectId === p.id && renameProjectAreaId === area.id;
             return (
               <div key={p.id} className="m-project-block">
@@ -2007,18 +2027,23 @@ export default function TaskTracker() {
                     <ChevronRight size={13} className={`m-project-chevron ${collapsed ? "" : "m-project-chevron--open"}`} />
                     <span className="m-project-dot" style={{ background: area.color }} />
                     <span className="m-project-name" style={{ color: area.color }}>{p.name.toUpperCase()}</span>
-                    <span className="m-project-count">{tasksOf(p.id).length}</span>
+                    <span className="m-project-count">{projectTaskCount}</span>
                   </div>
                 )}
                 {!collapsed && (
-                  <>
+                  <div className="m-project-tasks">
                     {tasksOf(p.id).map(renderMobileTaskRow)}
                     {renderMobileInlineAdd(area.id, p.id)}
-                  </>
+                  </div>
                 )}
               </div>
             );
           })}
+
+          <div className="m-project-block">
+            {generalTasks.map(renderMobileTaskRow)}
+            {renderMobileInlineAdd(area.id, null)}
+          </div>
         </div>
 
         {!isGeneralArea(area) && (
@@ -2221,7 +2246,7 @@ export default function TaskTracker() {
                 onDragOver={(e) => { if (draggedTaskId && draggedTaskId !== t.id) { e.preventDefault(); e.stopPropagation(); setDragOverKey(`task:${t.id}`); } }}
                 onDrop={(e) => { e.preventDefault(); e.stopPropagation(); reorderTask(draggedTaskId, t.id); }}
               >
-                <td className="td-check">
+                <td className={`td-check ${indent ? "td-check--indent" : ""}`}>
                   <button className="row-check" onClick={() => mobileToggleDone(t.id, t.status === "Hecho")}>
                     {t.status === "Hecho" || mobileCompletingIds.has(t.id)
                       ? <CheckCircle2 size={17} color="var(--good)" />
@@ -2569,7 +2594,7 @@ export default function TaskTracker() {
         .notif-row-meta { font-size: 12px; color: var(--text-faint); }
 
         /* ---- input card ---- */
-        .input-card { width: calc(100% - 40px); margin: 18px auto 6px; max-width: 880px; min-height: 158px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface); }
+        .input-card { width: calc(100% - 40px); margin: 18px auto 6px; max-width: 1320px; min-height: 158px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface); }
         .tabs { display: flex; border-bottom: 1px solid var(--border); }
         .tab-btn { padding: 11px 16px; font-size: 13.5px; color: var(--text-faint); background: none; border: none; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
         .tab-btn--active { color: var(--text); border-bottom-color: var(--amber); }
@@ -2597,7 +2622,7 @@ export default function TaskTracker() {
         .manual-area-fixed { display: flex; align-items: center; gap: 7px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; font-size: 13.5px; color: var(--text-dim); }
 
         /* ---- groups / table ---- */
-        .groups { flex: 1; overflow-y: auto; padding: 4px max(20px, calc((100% - 880px) / 2)) 24px; }
+        .groups { flex: 1; overflow-y: auto; padding: 4px max(20px, calc((100% - 1320px) / 2)) 24px; }
         .groups--first-view { padding-top: 18px; }
         .group { border: 1px solid var(--border); border-radius: 12px; margin-bottom: 16px; overflow: hidden; background: var(--surface); }
         .group-head { display: flex; align-items: center; gap: 10px; padding: 13px 16px; cursor: pointer; user-select: none; }
@@ -2653,6 +2678,7 @@ export default function TaskTracker() {
         .note-btn { color: var(--text-faint); font-size: 13px; cursor: pointer; background: none; border: none; padding: 0; }
         .note-btn:hover { color: var(--text-dim); }
         .td-check { text-align: center; }
+        .td-check--indent { padding-left: 16px; }
         .row-check { background: none; border: none; padding: 2px; display: inline-flex; cursor: pointer; }
         .td-detalle { text-align: center; }
         .td-indent { padding-left: 40px; }
@@ -2811,9 +2837,9 @@ export default function TaskTracker() {
         .settings-input:focus { border-color: rgba(232,163,61,0.5); }
         .settings-error { font-size: 12.5px; color: var(--alta); margin-bottom: 10px; }
         .settings-check { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--text-dim); margin-bottom: 18px; }
-        .settings-group-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); font-weight: 700; margin: 18px 4px 4px; }
-        .settings-row-title { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
-        .settings-row-desc { font-size: 12px; color: var(--text-dim); line-height: 1.5; margin-bottom: 12px; }
+        .settings-group-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); font-weight: 700; margin: 20px 4px 6px; }
+        .settings-row-title { font-size: 14.5px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
+        .settings-row-desc { font-size: 13px; color: var(--text-dim); line-height: 1.5; margin-bottom: 12px; }
         .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 0; border-top: 1px solid var(--border); }
         .settings-row .settings-row-desc { margin-bottom: 0; }
         .settings-select {
@@ -2896,7 +2922,7 @@ export default function TaskTracker() {
           }
           .m-header--sticky { position: sticky; top: 0; z-index: 5; background: var(--bg); }
           .m-back { background: none; border: none; color: var(--text-dim); padding: 4px; display: flex; flex-shrink: 0; }
-          .m-header-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+          .m-header-dot { width: 3px; height: 20px; border-radius: 2px; flex-shrink: 0; }
           .m-header-title { font-size: 16px; font-weight: 700; flex: 1; }
           .m-header-count { font-size: 12px; color: var(--text-faint); }
           .m-header-crumb { flex: 1; font-size: 13px; color: var(--text-dim); }
@@ -2906,11 +2932,12 @@ export default function TaskTracker() {
           .m-hide-done--active { color: var(--amber); border-color: rgba(232,163,61,0.4); }
 
           .m-project-block { margin-bottom: 18px; }
+          .m-project-tasks { padding-left: 18px; }
           .m-project-header { display: flex; align-items: center; gap: 8px; padding: 8px 4px; cursor: pointer; }
           .m-project-chevron { color: var(--text-faint); transition: transform 0.15s; flex-shrink: 0; }
           .m-project-chevron--open { transform: rotate(90deg); }
           .m-project-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
-          .m-project-name { flex: 1; font-size: 14.5px; font-weight: 700; letter-spacing: 0.03em; }
+          .m-project-name { flex: 1; font-size: 16.5px; font-weight: 700; letter-spacing: 0.03em; }
           .m-project-count { font-size: 11px; color: var(--text-faint); background: var(--surface-2); padding: 2px 7px; border-radius: 999px; }
 
           .m-inline-add-zone { min-height: 34px; cursor: text; }
@@ -3730,7 +3757,7 @@ export default function TaskTracker() {
                 <div className="settings-row">
                   <div>
                     <div className="settings-row-title">Inicio de semana</div>
-                    <div className="settings-row-desc">Cómo se ordenan los días en el calendario.</div>
+                    <div className="settings-row-desc">Orden de los días en el calendario.</div>
                   </div>
                   <select className="settings-select" value={weekStartsSunday ? "sun" : "mon"} onChange={(e) => setWeekStartsSunday(e.target.value === "sun")}>
                     <option value="mon">Lunes (sáb/dom al final)</option>
@@ -3740,7 +3767,7 @@ export default function TaskTracker() {
                 <div className="settings-row">
                   <div>
                     <div className="settings-row-title">Feriados en el calendario</div>
-                    <div className="settings-row-desc">País cuyos feriados se marcan con un puntito. Solo incluye feriados de fecha fija por ahora.</div>
+                    <div className="settings-row-desc">Marca feriados de fecha fija. Los que dependen de Pascua todavía no.</div>
                   </div>
                   <select className="settings-select" value={holidayCountry} onChange={(e) => setHolidayCountry(e.target.value)}>
                     <option value="none">Ninguno</option>
@@ -3757,7 +3784,7 @@ export default function TaskTracker() {
                 <div className="settings-row">
                   <div>
                     <div className="settings-row-title">Exportar / Restaurar</div>
-                    <div className="settings-row-desc">Backup manual a un archivo, independiente de la sincronización con Supabase.</div>
+                    <div className="settings-row-desc">Backup manual, aparte de la nube.</div>
                   </div>
                   <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
                     <button className="modal-btn modal-btn--cancel" onClick={exportData}><Download size={13} /> Exportar</button>
@@ -3769,7 +3796,7 @@ export default function TaskTracker() {
                 <div className="settings-row">
                   <div>
                     <div className="settings-row-title">Borrar todos los datos</div>
-                    <div className="settings-row-desc">Elimina todas las áreas, proyectos y tareas de tu cuenta. No se puede deshacer.</div>
+                    <div className="settings-row-desc">Borra todo. No se puede deshacer.</div>
                   </div>
                   <button className="modal-btn modal-btn--danger" onClick={() => setConfirmingWipe(true)}>Borrar todos los datos</button>
                 </div>
