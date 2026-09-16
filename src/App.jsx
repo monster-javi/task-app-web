@@ -110,6 +110,26 @@ function dateToISOLocal(d) {
   return isoOf(d.getFullYear(), d.getMonth(), d.getDate());
 }
 
+// Fixed-date public holidays only (month-day, no year) — movable ones tied to
+// Easter aren't included here, that needs real date math we haven't built.
+const HOLIDAYS_BY_COUNTRY = {
+  AR: [["01-01", "Año Nuevo"], ["05-01", "Día del Trabajador"], ["05-25", "Revolución de Mayo"], ["06-20", "Día de la Bandera"], ["07-09", "Día de la Independencia"], ["12-08", "Inmaculada Concepción"], ["12-25", "Navidad"]],
+  ES: [["01-01", "Año Nuevo"], ["01-06", "Reyes"], ["05-01", "Día del Trabajador"], ["08-15", "Asunción"], ["10-12", "Fiesta Nacional"], ["11-01", "Todos los Santos"], ["12-06", "Día de la Constitución"], ["12-08", "Inmaculada Concepción"], ["12-25", "Navidad"]],
+  MX: [["01-01", "Año Nuevo"], ["05-01", "Día del Trabajo"], ["09-16", "Independencia"], ["11-20", "Revolución"], ["12-25", "Navidad"]],
+  US: [["01-01", "New Year's Day"], ["07-04", "Independence Day"], ["11-11", "Veterans Day"], ["12-25", "Christmas"]],
+  BR: [["01-01", "Ano Novo"], ["04-21", "Tiradentes"], ["05-01", "Dia do Trabalho"], ["09-07", "Independência"], ["10-12", "N. Sra. Aparecida"], ["11-02", "Finados"], ["11-15", "Proclamação da República"], ["12-25", "Natal"]],
+  CL: [["01-01", "Año Nuevo"], ["05-01", "Día del Trabajo"], ["05-21", "Glorias Navales"], ["09-18", "Independencia"], ["09-19", "Glorias del Ejército"], ["12-25", "Navidad"]],
+  none: [],
+};
+
+function isHoliday(iso, countryCode) {
+  const list = HOLIDAYS_BY_COUNTRY[countryCode];
+  if (!list || !list.length) return null;
+  const monthDay = iso.slice(5); // "MM-DD"
+  const hit = list.find(([md]) => md === monthDay);
+  return hit ? hit[1] : null;
+}
+
 function todayISO() {
   return dateToISOLocal(new Date());
 }
@@ -137,8 +157,11 @@ function weekdayFullOf(iso) {
   return WEEKDAY_FULL_BY_JSDAY[new Date(y, m - 1, d).getDay()];
 }
 
-function buildMonthGrid(year, month) {
-  const firstWeekday = (new Date(year, month, 1).getDay() + 6) % 7; // 0 = Monday
+const WEEKDAY_LABELS_SUN_FIRST = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
+
+function buildMonthGrid(year, month, sundayFirst) {
+  const rawDay = new Date(year, month, 1).getDay(); // 0 = Sunday (JS native)
+  const firstWeekday = sundayFirst ? rawDay : (rawDay + 6) % 7;
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const daysInPrevMonth = new Date(year, month, 0).getDate();
   const cells = [];
@@ -161,16 +184,16 @@ function buildMonthGrid(year, month) {
   return cells;
 }
 
-function buildWeekDays(anchorIso) {
+function buildWeekDays(anchorIso, sundayFirst) {
   const [y, m, d] = anchorIso.split("-").map(Number);
   const dt = new Date(y, m - 1, d);
-  const dow = (dt.getDay() + 6) % 7; // 0 = Monday
-  const monday = new Date(dt);
-  monday.setDate(dt.getDate() - dow);
+  const dow = sundayFirst ? dt.getDay() : (dt.getDay() + 6) % 7;
+  const weekStart = new Date(dt);
+  weekStart.setDate(dt.getDate() - dow);
   const days = [];
   for (let i = 0; i < 7; i++) {
-    const cur = new Date(monday);
-    cur.setDate(monday.getDate() + i);
+    const cur = new Date(weekStart);
+    cur.setDate(weekStart.getDate() + i);
     days.push({ iso: dateToISOLocal(cur), day: cur.getDate() });
   }
   return days;
@@ -500,20 +523,41 @@ function DateField({ value, onChange, overdue }) {
   );
 }
 
-function QuickAddRow({ placeholder, onAdd, indent }) {
+function QuickAddRow({ placeholder, onAdd, indent, general }) {
+  const [active, setActive] = useState(false);
+  const [val, setVal] = useState("");
+  function submit() {
+    const clean = val.trim();
+    if (!clean) { setActive(false); return; }
+    onAdd(clean);
+    setVal("");
+  }
+  if (!active) {
+    return (
+      <div
+        className={`quick-add-row quick-add-row--ghost ${indent ? "quick-add-row--indent" : ""}`}
+        onClick={() => setActive(true)}
+        title={general ? "Agregar tarea general (sin proyecto)" : "Agregar tarea"}
+      >
+        <span className={`quick-add-ghost-dot ${general ? "quick-add-ghost-dot--general" : ""}`} />
+      </div>
+    );
+  }
   return (
     <div className={`quick-add-row ${indent ? "quick-add-row--indent" : ""}`}>
       <Plus size={12} className="quick-add-icon" />
       <input
+        autoFocus
         type="text"
         className="quick-add-input"
-        placeholder={placeholder}
+        placeholder={placeholder || (general ? "Nueva tarea general..." : "Nueva tarea...")}
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            onAdd(e.target.value);
-            e.target.value = "";
-          }
+          if (e.key === "Enter") { e.preventDefault(); submit(); }
+          if (e.key === "Escape") setActive(false);
         }}
+        onBlur={() => setActive(false)}
       />
     </div>
   );
@@ -589,12 +633,16 @@ export default function TaskTracker() {
   const [selectedAreaId, setSelectedAreaId] = useState("all");
   const [selectedProjectId, setSelectedProjectId] = useState(null);
   const [hideCompleted, setHideCompleted] = useState(true);
+  const [appLang, setAppLang] = useState("es");
+  const [weekStartsSunday, setWeekStartsSunday] = useState(false);
+  const [holidayCountry, setHolidayCountry] = useState("AR");
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState("texto");
   const [freeText, setFreeText] = useState("");
   const [collapsed, setCollapsed] = useState({});
   const [editingNoteId, setEditingNoteId] = useState(null);
   const [editingTitleId, setEditingTitleId] = useState(null);
+  const freshTaskIdRef = useRef(null);
 
   const [manualTitle, setManualTitle] = useState("");
   const [manualArea, setManualArea] = useState("");
@@ -891,7 +939,7 @@ export default function TaskTracker() {
   // ---- autosave (debounced); encrypts client-side first only if encryption is on ----
   useEffect(() => {
     if (!session || !hasLoadedRef.current || bootStatus !== "ready") return;
-    const id = setTimeout(() => { saveNow(); }, 600);
+    const id = setTimeout(() => { saveNow(); }, 150);
     return () => clearTimeout(id);
   }, [areas, tasks, bootStatus, session]);
 
@@ -1014,8 +1062,8 @@ export default function TaskTracker() {
     return [...areas].sort((a, b) => (isGeneralArea(a) ? 1 : 0) - (isGeneralArea(b) ? 1 : 0));
   }, [areas]);
 
-  const pendientes = tasks.filter((t) => t.status !== "Hecho").length;
-  const vencidas = tasks.filter((t) => isOverdue(t.date, t.status)).length;
+  const pendientes = tasks.filter((t) => t.status !== "Hecho" || mobileCompletingIds.has(t.id)).length;
+  const vencidas = tasks.filter((t) => isOverdue(t.date, t.status) || mobileCompletingIds.has(t.id)).length;
 
   const areaCounts = useMemo(() => {
     const map = {};
@@ -1034,11 +1082,11 @@ export default function TaskTracker() {
     return tasks.filter((t) => {
       if (selectedAreaId !== "all" && t.areaId !== selectedAreaId) return false;
       if (selectedAreaId !== "all" && selectedProjectId && t.projectId !== selectedProjectId) return false;
-      if (hideCompleted && t.status === "Hecho") return false;
+      if (hideCompleted && t.status === "Hecho" && !mobileCompletingIds.has(t.id)) return false;
       if (search.trim() && !t.title.toLowerCase().includes(search.toLowerCase())) return false;
       return true;
     });
-  }, [tasks, selectedAreaId, selectedProjectId, hideCompleted, search]);
+  }, [tasks, selectedAreaId, selectedProjectId, hideCompleted, search, mobileCompletingIds]);
 
   const grouped = useMemo(() => {
     const byArea = {};
@@ -1122,8 +1170,8 @@ export default function TaskTracker() {
     return map;
   }, [tasks, selectedAreaId, selectedProjectId]);
 
-  const monthGrid = useMemo(() => buildMonthGrid(calCursor.year, calCursor.month), [calCursor]);
-  const weekDays = useMemo(() => buildWeekDays(weekAnchor), [weekAnchor]);
+  const monthGrid = useMemo(() => buildMonthGrid(calCursor.year, calCursor.month, weekStartsSunday), [calCursor, weekStartsSunday]);
+  const weekDays = useMemo(() => buildWeekDays(weekAnchor, weekStartsSunday), [weekAnchor, weekStartsSunday]);
   const focusedDate = calView === "dia" ? dayAnchor : selectedDay;
 
   function showToast(msg) {
@@ -1382,6 +1430,15 @@ export default function TaskTracker() {
       return list;
     });
     setEditingTitleId(newId);
+    freshTaskIdRef.current = newId;
+  }
+
+  function handleTitleEscape(taskId) {
+    if (freshTaskIdRef.current === taskId) {
+      removeTask(taskId);
+      freshTaskIdRef.current = null;
+    }
+    setEditingTitleId(null);
   }
 
   function startRenameProject(areaId, project) {
@@ -1491,7 +1548,8 @@ export default function TaskTracker() {
   function colGroupFor(showArea) {
     return (
       <colgroup>
-        <col style={{ width: showArea ? "28%" : "34%" }} />
+        <col style={{ width: "28px" }} />
+        <col style={{ width: showArea ? "27%" : "33%" }} />
         {showArea && <col style={{ width: "18%" }} />}
         <col style={{ width: showArea ? "18%" : "26%" }} />
         <col style={{ width: "14%" }} />
@@ -1534,7 +1592,7 @@ export default function TaskTracker() {
     }
   }
   function mobileCountFor(areaId) {
-    return tasks.filter((t) => t.areaId === areaId && t.status !== "Hecho").length;
+    return tasks.filter((t) => t.areaId === areaId && (t.status !== "Hecho" || mobileCompletingIds.has(t.id))).length;
   }
   function toggleMobileFilter(kind) {
     setMobileExpandedFilter((cur) => (cur === kind ? null : kind));
@@ -1677,7 +1735,7 @@ export default function TaskTracker() {
               onBlur={(e) => { commitTaskTitle(t.id, e.target.value); setEditingTitleId(null); }}
               onKeyDown={(e) => {
                 if (e.key === "Enter") { e.preventDefault(); commitTitleAndAddNext(t, e.target.value); }
-                if (e.key === "Escape") setEditingTitleId(null);
+                if (e.key === "Escape") handleTitleEscape(t.id);
               }}
             />
           ) : (
@@ -1711,9 +1769,9 @@ export default function TaskTracker() {
     const matchedAreas = q ? areas.filter((a) => a.name.toLowerCase().includes(q)) : [];
     const matchedTasks = q ? tasks.filter((t) => t.title.toLowerCase().includes(q) || (t.note || "").toLowerCase().includes(q)) : [];
     const filteredTasks = mobileExpandedFilter === "vencidas"
-      ? tasks.filter((t) => isOverdue(t.date, t.status))
+      ? tasks.filter((t) => isOverdue(t.date, t.status) || mobileCompletingIds.has(t.id))
       : mobileExpandedFilter === "pendientes"
-      ? tasks.filter((t) => t.status !== "Hecho")
+      ? tasks.filter((t) => t.status !== "Hecho" || mobileCompletingIds.has(t.id))
       : null;
 
     return (
@@ -1779,7 +1837,7 @@ export default function TaskTracker() {
             </>
           ) : (
             <>
-              {areas.map((a) => (
+              {orderedAreas.map((a) => (
                 renamingAreaId === a.id ? (
                   <div key={a.id} className="m-area-card m-area-card--renaming">
                     <span className="m-area-bar" style={{ background: a.color }} />
@@ -2138,6 +2196,7 @@ export default function TaskTracker() {
         {showHeader && (
           <thead>
             <tr>
+              <th></th>
               <th>Tarea</th>
               {showArea && <th>Área</th>}
               <th className="col-center">Detalle</th>
@@ -2162,6 +2221,13 @@ export default function TaskTracker() {
                 onDragOver={(e) => { if (draggedTaskId && draggedTaskId !== t.id) { e.preventDefault(); e.stopPropagation(); setDragOverKey(`task:${t.id}`); } }}
                 onDrop={(e) => { e.preventDefault(); e.stopPropagation(); reorderTask(draggedTaskId, t.id); }}
               >
+                <td className="td-check">
+                  <button className="row-check" onClick={() => mobileToggleDone(t.id, t.status === "Hecho")}>
+                    {t.status === "Hecho" || mobileCompletingIds.has(t.id)
+                      ? <CheckCircle2 size={17} color="var(--good)" />
+                      : <Circle size={17} color="var(--text-faint)" />}
+                  </button>
+                </td>
                 <td className={indent ? "td-indent" : ""}>
                   {editingTitleId === t.id ? (
                     <input
@@ -2171,7 +2237,7 @@ export default function TaskTracker() {
                       onBlur={(e) => commitTaskTitle(t.id, e.target.value)}
                       onKeyDown={(e) => {
                         if (e.key === "Enter") { e.preventDefault(); commitTitleAndAddNext(t, e.target.value); }
-                        if (e.key === "Escape") setEditingTitleId(null);
+                        if (e.key === "Escape") handleTitleEscape(t.id);
                       }}
                     />
                   ) : (
@@ -2484,6 +2550,7 @@ export default function TaskTracker() {
         .sync-indicator { cursor: default; color: var(--text-dim); }
         .sync-indicator--error { color: var(--alta) !important; border-color: rgba(240,85,75,0.4) !important; }
         .sync-indicator:hover { color: var(--text-dim); border-color: var(--border); }
+        .lang-select { padding: 6px 8px; cursor: pointer; font-size: 12px; font-weight: 700; }
 
         .bell-wrap { position: relative; display: inline-flex; }
         .bell-dot { position: absolute; top: 4px; right: 4px; width: 6px; height: 6px; border-radius: 50%; background: var(--alta); border: 1.5px solid var(--surface); }
@@ -2502,7 +2569,7 @@ export default function TaskTracker() {
         .notif-row-meta { font-size: 12px; color: var(--text-faint); }
 
         /* ---- input card ---- */
-        .input-card { margin: 18px 20px 6px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface); }
+        .input-card { width: calc(100% - 40px); margin: 18px auto 6px; max-width: 880px; min-height: 158px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface); }
         .tabs { display: flex; border-bottom: 1px solid var(--border); }
         .tab-btn { padding: 11px 16px; font-size: 13.5px; color: var(--text-faint); background: none; border: none; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
         .tab-btn--active { color: var(--text); border-bottom-color: var(--amber); }
@@ -2530,7 +2597,7 @@ export default function TaskTracker() {
         .manual-area-fixed { display: flex; align-items: center; gap: 7px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; font-size: 13.5px; color: var(--text-dim); }
 
         /* ---- groups / table ---- */
-        .groups { flex: 1; overflow-y: auto; padding: 4px 20px 24px; }
+        .groups { flex: 1; overflow-y: auto; padding: 4px max(20px, calc((100% - 880px) / 2)) 24px; }
         .groups--first-view { padding-top: 18px; }
         .group { border: 1px solid var(--border); border-radius: 12px; margin-bottom: 16px; overflow: hidden; background: var(--surface); }
         .group-head { display: flex; align-items: center; gap: 10px; padding: 13px 16px; cursor: pointer; user-select: none; }
@@ -2548,6 +2615,10 @@ export default function TaskTracker() {
         .subgroup-count { font-size: 11.5px; color: var(--text-dim); background: var(--surface-2); padding: 3px 9px; border-radius: 999px; }
 
         .quick-add-row { display: flex; align-items: center; gap: 8px; padding: 9px 16px; border-top: 1px solid var(--border); }
+        .quick-add-row--ghost { cursor: text; min-height: 32px; border-top: none; padding: 4px 16px; }
+        .quick-add-ghost-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); opacity: 0.12; }
+        .quick-add-ghost-dot--general { border-radius: 2px; }
+        .quick-add-row--ghost:hover .quick-add-ghost-dot { opacity: 0.35; }
         .quick-add-row--indent { padding-left: 40px; }
         .quick-add-icon { color: var(--text-faint); flex-shrink: 0; opacity: 0.7; }
         .quick-add-input { flex: 1; background: none; border: none; outline: none; color: var(--text-dim); font-size: 13.5px; }
@@ -2581,6 +2652,8 @@ export default function TaskTracker() {
         .task-title--done { color: var(--text-faint); text-decoration: line-through; }
         .note-btn { color: var(--text-faint); font-size: 13px; cursor: pointer; background: none; border: none; padding: 0; }
         .note-btn:hover { color: var(--text-dim); }
+        .td-check { text-align: center; }
+        .row-check { background: none; border: none; padding: 2px; display: inline-flex; cursor: pointer; }
         .td-detalle { text-align: center; }
         .td-indent { padding-left: 40px; }
         .col-center { text-align: center; }
@@ -2684,7 +2757,8 @@ export default function TaskTracker() {
 
         .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-bottom: 18px; }
         .cal-weekday { text-align: center; font-size: 11.5px; color: var(--text-faint); font-weight: 600; padding: 4px 0 8px; display: flex; align-items: center; justify-content: center; gap: 5px; }
-        .cal-day { border: 1px solid var(--border); border-radius: 9px; background: var(--surface); min-height: 84px; min-width: 0; overflow: hidden; padding: 7px; cursor: pointer; display: flex; flex-direction: column; gap: 4px; transition: border-color .12s, background .12s; }
+        .cal-day { border: 1px solid var(--border); border-radius: 9px; background: var(--surface); min-height: 168px; min-width: 0; overflow: hidden; padding: 7px; cursor: pointer; display: flex; flex-direction: column; gap: 4px; transition: border-color .12s, background .12s; position: relative; }
+        .cal-holiday-dot { position: absolute; top: 6px; right: 6px; width: 6px; height: 6px; border-radius: 50%; background: var(--alta); }
         .cal-day--week { min-height: 220px; }
         .cal-day:hover { border-color: #33383f; }
         .cal-day--out { opacity: 0.35; }
@@ -2737,11 +2811,15 @@ export default function TaskTracker() {
         .settings-input:focus { border-color: rgba(232,163,61,0.5); }
         .settings-error { font-size: 12.5px; color: var(--alta); margin-bottom: 10px; }
         .settings-check { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--text-dim); margin-bottom: 18px; }
-        .settings-danger-zone {
-          margin: 18px 0; padding: 14px; border: 1px solid rgba(240,85,75,0.3); border-radius: 10px; background: rgba(240,85,75,0.06);
-        }
+        .settings-group-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); font-weight: 700; margin: 18px 4px 4px; }
         .settings-row-title { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
         .settings-row-desc { font-size: 12px; color: var(--text-dim); line-height: 1.5; margin-bottom: 12px; }
+        .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 0; border-top: 1px solid var(--border); }
+        .settings-row .settings-row-desc { margin-bottom: 0; }
+        .settings-select {
+          background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+          color: var(--text); font-size: 13px; padding: 8px 10px; flex-shrink: 0;
+        }
 
         /* ---------- MOBILE ---------- */
         @media (max-width: 820px) {
@@ -3168,6 +3246,17 @@ export default function TaskTracker() {
               </>
             )}
           </span>
+          <input ref={restoreInputRef} type="file" accept="application/json" style={{ display: "none" }} onChange={restoreData} />
+          <button
+            className="iconbtn icon-only"
+            onClick={() => setShowEncSettings(true)}
+            title={isEncrypted ? "Datos cifrados — ver cifrado" : "Datos sin cifrar — ver cifrado"}
+          >
+            {isEncrypted ? <Lock size={14} /> : <Unlock size={14} />}
+          </button>
+          <button className="iconbtn icon-only" onClick={() => setShowSettingsPanel(true)} title="Configuración">
+            <Settings size={14} />
+          </button>
           <span
             className={`iconbtn icon-only sync-indicator ${syncError ? "sync-indicator--error" : ""}`}
             onClick={() => { if (syncError) saveNow(); }}
@@ -3176,23 +3265,10 @@ export default function TaskTracker() {
           >
             {syncError ? <CloudOff size={14} /> : saving ? <RefreshCw size={14} className="spin" /> : <Cloud size={14} />}
           </span>
-          <button className="iconbtn" onClick={exportData} title="Descargar un backup en .json">
-            <Download size={13} /> Exportar
-          </button>
-          <button className="iconbtn" onClick={() => restoreInputRef.current?.click()} title="Restaurar desde un backup en .json">
-            <Upload size={13} /> Restaurar
-          </button>
-          <input ref={restoreInputRef} type="file" accept="application/json" style={{ display: "none" }} onChange={restoreData} />
-          <button className="iconbtn icon-only" onClick={() => setShowSettingsPanel(true)} title="Configuración">
-            <Settings size={14} />
-          </button>
-          <button
-            className="iconbtn icon-only"
-            onClick={() => setShowEncSettings(true)}
-            title={isEncrypted ? "Datos cifrados — ver cifrado" : "Datos sin cifrar — ver cifrado"}
-          >
-            {isEncrypted ? <Lock size={14} /> : <Unlock size={14} />}
-          </button>
+          <select className="iconbtn lang-select" value={appLang} onChange={(e) => setAppLang(e.target.value)} title="Idioma">
+            <option value="es">ES</option>
+            <option value="en">EN</option>
+          </select>
         </div>
 
         {view === "lista" ? (
@@ -3329,6 +3405,7 @@ export default function TaskTracker() {
                           <QuickAddRow
                             placeholder="..."
                             onAdd={(title) => addQuickTask(area.id, null, title)}
+                            general
                           />
                         </div>
                         {!isGeneralArea(area) && (
@@ -3424,17 +3501,20 @@ export default function TaskTracker() {
 
             {calView === "mes" && (
               <div className="cal-grid">
-                {WEEKDAY_LABELS.map((w) => <div key={w} className="cal-weekday">{w}</div>)}
+                {(weekStartsSunday ? WEEKDAY_LABELS_SUN_FIRST : WEEKDAY_LABELS).map((w) => <div key={w} className="cal-weekday">{w}</div>)}
                 {monthGrid.map((cell) => {
                   const dayTasks = tasksByDate[cell.iso] || [];
                   const isToday = cell.iso === todayISO();
                   const isSelected = cell.iso === selectedDay;
+                  const holidayName = isHoliday(cell.iso, holidayCountry);
                   return (
                     <div
                       key={cell.iso}
                       className={`cal-day ${!cell.inMonth ? "cal-day--out" : ""} ${isToday ? "cal-day--today" : ""} ${isSelected ? "cal-day--selected" : ""}`}
                       onClick={() => setSelectedDay(cell.iso)}
+                      title={holidayName || undefined}
                     >
+                      {holidayName && <span className="cal-holiday-dot" />}
                       <div className="cal-day-num">{cell.day}</div>
                       <div className="cal-day-tasks">
                         {dayTasks.slice(0, 3).map((t) => (
@@ -3454,7 +3534,7 @@ export default function TaskTracker() {
             {calView === "semana" && (
               <div className="cal-grid">
                 {weekDays.map((d, i) => (
-                  <div key={`h-${d.iso}`} className="cal-weekday">{WEEKDAY_LABELS[i]} <span className="mono">{d.day}</span></div>
+                  <div key={`h-${d.iso}`} className="cal-weekday">{(weekStartsSunday ? WEEKDAY_LABELS_SUN_FIRST : WEEKDAY_LABELS)[i]} <span className="mono">{d.day}</span></div>
                 ))}
                 {weekDays.map((cell) => {
                   const dayTasks = tasksByDate[cell.iso] || [];
@@ -3646,18 +3726,51 @@ export default function TaskTracker() {
 
             {!confirmingWipe ? (
               <>
-                <div className="modal-text">
-                  Backup manual: descargá tus datos a un archivo, o restaurá desde uno. Independiente de la
-                  sincronización con Supabase — sirve como copia de respaldo aparte.
+                <div className="settings-group-title">Calendario</div>
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-row-title">Inicio de semana</div>
+                    <div className="settings-row-desc">Cómo se ordenan los días en el calendario.</div>
+                  </div>
+                  <select className="settings-select" value={weekStartsSunday ? "sun" : "mon"} onChange={(e) => setWeekStartsSunday(e.target.value === "sun")}>
+                    <option value="mon">Lunes (sáb/dom al final)</option>
+                    <option value="sun">Domingo</option>
+                  </select>
                 </div>
-                <div className="modal-actions" style={{ justifyContent: "flex-start", gap: 10 }}>
-                  <button className="modal-btn modal-btn--cancel" onClick={exportData}><Download size={13} /> Exportar</button>
-                  <button className="modal-btn modal-btn--cancel" onClick={() => restoreInputRef.current?.click()}><Upload size={13} /> Restaurar</button>
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-row-title">Feriados en el calendario</div>
+                    <div className="settings-row-desc">País cuyos feriados se marcan con un puntito. Solo incluye feriados de fecha fija por ahora.</div>
+                  </div>
+                  <select className="settings-select" value={holidayCountry} onChange={(e) => setHolidayCountry(e.target.value)}>
+                    <option value="none">Ninguno</option>
+                    <option value="AR">Argentina</option>
+                    <option value="ES">España</option>
+                    <option value="MX">México</option>
+                    <option value="US">Estados Unidos</option>
+                    <option value="BR">Brasil</option>
+                    <option value="CL">Chile</option>
+                  </select>
                 </div>
 
-                <div className="settings-danger-zone">
-                  <div className="settings-row-title">Borrar todos los datos</div>
-                  <div className="settings-row-desc">Elimina todas las áreas, proyectos y tareas de tu cuenta. No se puede deshacer.</div>
+                <div className="settings-group-title">Datos</div>
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-row-title">Exportar / Restaurar</div>
+                    <div className="settings-row-desc">Backup manual a un archivo, independiente de la sincronización con Supabase.</div>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                    <button className="modal-btn modal-btn--cancel" onClick={exportData}><Download size={13} /> Exportar</button>
+                    <button className="modal-btn modal-btn--cancel" onClick={() => restoreInputRef.current?.click()}><Upload size={13} /> Restaurar</button>
+                  </div>
+                </div>
+
+                <div className="settings-group-title">Zona de riesgo</div>
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-row-title">Borrar todos los datos</div>
+                    <div className="settings-row-desc">Elimina todas las áreas, proyectos y tareas de tu cuenta. No se puede deshacer.</div>
+                  </div>
                   <button className="modal-btn modal-btn--danger" onClick={() => setConfirmingWipe(true)}>Borrar todos los datos</button>
                 </div>
 
