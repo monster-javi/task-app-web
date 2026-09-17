@@ -801,38 +801,60 @@ export default function TaskTracker() {
     }
     load();
 
+    async function applyIncomingRow(row) {
+      if (!row || !row.updated_at) return;
+      const updatedAt = new Date(row.updated_at).getTime();
+      if (updatedAt <= lastAppliedUpdatedAtRef.current) return; // our own echo or stale
+      lastAppliedUpdatedAtRef.current = updatedAt;
+      if (!row.data || !row.data.encrypted) {
+        setAreas((row.data && row.data.areas) || []);
+        setTasks((row.data && row.data.tasks) || []);
+        setLastSyncAt(updatedAt);
+        return;
+      }
+      if (!encryptionKeyRef.current) return; // still locked; will pick up latest on unlock instead
+      try {
+        const data = await decryptPayload(encryptionKeyRef.current, row.data);
+        setAreas(data.areas || []);
+        setTasks(data.tasks || []);
+        setLastSyncAt(updatedAt);
+      } catch {
+        /* wrong-session key vs. newer envelope; ignore, next unlock will resync */
+      }
+    }
+
+    async function resyncNow() {
+      if (cancelled || !hasLoadedRef.current) return;
+      const { data: row, error } = await supabase.from("app_data").select("data,updated_at").maybeSingle();
+      if (error || cancelled) return;
+      applyIncomingRow(row);
+    }
+
     const channel = supabase
       .channel(`app_data_changes_${userId}`)
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "app_data", filter: `user_id=eq.${userId}` },
-        (payload) => {
-          const row = payload.new;
-          if (!row || !row.updated_at) return;
-          const updatedAt = new Date(row.updated_at).getTime();
-          if (updatedAt <= lastAppliedUpdatedAtRef.current) return; // our own echo or stale
-          lastAppliedUpdatedAtRef.current = updatedAt;
-          if (!row.data || !row.data.encrypted) {
-            setAreas((row.data && row.data.areas) || []);
-            setTasks((row.data && row.data.tasks) || []);
-            setLastSyncAt(updatedAt);
-            return;
-          }
-          if (!encryptionKeyRef.current) return; // still locked; will pick up latest on unlock instead
-          decryptPayload(encryptionKeyRef.current, row.data)
-            .then((data) => {
-              setAreas(data.areas || []);
-              setTasks(data.tasks || []);
-              setLastSyncAt(updatedAt);
-            })
-            .catch(() => { /* wrong-session key vs. newer envelope; ignore, next unlock will resync */ });
-        }
+        (payload) => applyIncomingRow(payload.new)
       )
       .subscribe();
+
+    // Mobile browsers routinely suspend or silently drop an idle WebSocket
+    // in the background — the realtime subscription alone can't be trusted
+    // to catch every change on its own there. Actively re-check whenever the
+    // tab/app regains focus, and on a short interval while it's open, so a
+    // missed message doesn't leave this device stale until its next edit.
+    function onVisible() { if (document.visibilityState === "visible") resyncNow(); }
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    const pollId = setInterval(resyncNow, 15000);
 
     return () => {
       cancelled = true;
       supabase.removeChannel(channel);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+      clearInterval(pollId);
     };
   }, [session]);
 
@@ -1326,6 +1348,30 @@ export default function TaskTracker() {
     setEditingTitleId(null);
   }
 
+  function closeTitleEditing(id, value) {
+    const clean = value.trim();
+    if (clean) {
+      setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, title: clean } : t)));
+    } else if (freshTaskIdRef.current === id) {
+      // A task created mid-chain (via Enter) that never got any text typed
+      // into it — don't leave a blank, invisible task sitting in the list.
+      removeTask(id);
+      freshTaskIdRef.current = null;
+    }
+    setEditingTitleId(null);
+  }
+
+  function discardTitleEditing(id) {
+    // Desktop: leaving without pressing Enter always discards — a fresh
+    // (chained) task that was never confirmed gets removed; an existing
+    // task being renamed just keeps its original title untouched.
+    if (freshTaskIdRef.current === id) {
+      removeTask(id);
+      freshTaskIdRef.current = null;
+    }
+    setEditingTitleId(null);
+  }
+
   function removeTask(id) {
     setTasks((prev) => prev.filter((t) => t.id !== id));
   }
@@ -1740,7 +1786,7 @@ export default function TaskTracker() {
         {...taskRowSwipeHandlers(t)}
       >
         <button className="m-check" onClick={() => mobileToggleDone(t.id, done)}>
-          {done || completing ? <CheckCircle2 size={20} color="var(--good)" /> : <Circle size={20} color="var(--text-faint)" />}
+          {done || completing ? <CheckCircle2 size={17} color="var(--good)" /> : <Circle size={17} color="var(--text-faint)" />}
         </button>
         <div className="m-task-main">
           {editingTitleId === t.id ? (
@@ -1750,7 +1796,7 @@ export default function TaskTracker() {
               defaultValue={t.title}
               onBlur={(e) => {
                 if (titleKeyHandledRef.current === t.id) { titleKeyHandledRef.current = null; return; }
-                commitTitleAndAddNext(t, e.target.value);
+                closeTitleEditing(t.id, e.target.value);
               }}
               onKeyDown={(e) => {
                 if (e.key === "Enter") { e.preventDefault(); titleKeyHandledRef.current = t.id; commitTitleAndAddNext(t, e.target.value); }
@@ -2285,8 +2331,8 @@ export default function TaskTracker() {
                 <td className={`td-check ${indent ? "td-check--indent" : ""}`}>
                   <button className="row-check" onClick={() => mobileToggleDone(t.id, t.status === "Hecho")}>
                     {t.status === "Hecho" || mobileCompletingIds.has(t.id)
-                      ? <CheckCircle2 size={17} color="var(--good)" />
-                      : <Circle size={17} color="var(--text-faint)" />}
+                      ? <CheckCircle2 size={14} color="var(--good)" />
+                      : <Circle size={14} color="var(--text-faint)" />}
                   </button>
                 </td>
                 <td className={indent ? "td-indent" : ""}>
@@ -2295,7 +2341,7 @@ export default function TaskTracker() {
                       autoFocus
                       className="title-input"
                       defaultValue={t.title}
-                      onBlur={(e) => commitTaskTitle(t.id, e.target.value)}
+                      onBlur={() => discardTitleEditing(t.id)}
                       onKeyDown={(e) => {
                         if (e.key === "Enter") { e.preventDefault(); commitTitleAndAddNext(t, e.target.value); }
                         if (e.key === "Escape") handleTitleEscape(t.id);
@@ -2667,7 +2713,7 @@ export default function TaskTracker() {
         .group-count { font-size: 12px; color: var(--text-dim); background: var(--surface-2); padding: 4px 9px; border-radius: 999px; }
         .chev { color: var(--text-faint); }
 
-        .subgroup { border-top: 1px solid var(--border); }
+        .subgroup { border-top: 2px solid var(--border); margin-top: 4px; }
         .subgroup-head { display: flex; align-items: center; gap: 8px; padding: 10px 16px; cursor: pointer; user-select: none; }
         .subgroup-head:hover { background: var(--surface-2); }
         .subgroup-chev { display: flex; color: var(--text-dim); flex-shrink: 0; }
@@ -2715,8 +2761,8 @@ export default function TaskTracker() {
         .td-detalle { text-align: center; }
         .td-indent { padding-left: 40px; }
         .col-center { text-align: center; }
-        .note-input { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; color: var(--text-dim); font-size: 13px; padding: 5px 8px; width: 85%; outline: none; }
-        .title-input { background: var(--surface-2); border: 1px solid var(--amber); border-radius: 6px; color: var(--text); font-size: 14px; padding: 5px 8px; width: 100%; outline: none; }
+        .note-input { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; color: var(--text-dim); font-size: 13px; padding: 5px 8px 5px 3px; width: 85%; outline: none; }
+        .title-input { background: var(--surface-2); border: 1px solid var(--amber); border-radius: 6px; color: var(--text); font-size: 14px; padding: 5px 8px 5px 3px; width: 100%; outline: none; }
         .note-text { color: var(--text-dim); font-size: 13.5px; }
 
         .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-dim); cursor: pointer; }
@@ -3003,7 +3049,7 @@ export default function TaskTracker() {
           .m-task-title--done { color: var(--text-faint); text-decoration: line-through; }
           .m-task-title-input, .m-task-note-input {
             width: 100%; background: var(--surface-2); border: 1px solid rgba(232,163,61,0.4); border-radius: 6px;
-            outline: none; color: var(--text); font-size: 15px; padding: 5px 7px; font-family: inherit;
+            outline: none; color: var(--text); font-size: 15px; padding: 5px 7px 5px 3px; font-family: inherit;
           }
           .m-task-note { font-size: 13px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
           .m-task-note--empty { color: var(--text-faint); opacity: 0.6; }
