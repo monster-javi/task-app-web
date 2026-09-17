@@ -140,6 +140,26 @@ function fmtDate(iso) {
   return `${d}/${m}/${y}`;
 }
 
+const LOCAL_PREFS_KEY = "taskapp_prefs_v1";
+
+function loadLocalPrefs() {
+  try {
+    const raw = localStorage.getItem(LOCAL_PREFS_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveLocalPrefs(patch) {
+  try {
+    const current = loadLocalPrefs();
+    localStorage.setItem(LOCAL_PREFS_KEY, JSON.stringify({ ...current, ...patch }));
+  } catch {
+    /* storage unavailable (private mode, etc.) — just skip persisting */
+  }
+}
+
 function maskEmail(email) {
   if (!email) return "";
   const at = email.indexOf("@");
@@ -601,8 +621,8 @@ export default function TaskTracker() {
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
   }, []);
-  const [mobileScreen, setMobileScreen] = useState("areas"); // areas | area | task | quickadd
-  const [mobileAreaId, setMobileAreaId] = useState(null);
+  const [mobileScreen, setMobileScreen] = useState(() => (loadLocalPrefs().mobileScreen === "area" ? "area" : "areas")); // areas | area | task | quickadd
+  const [mobileAreaId, setMobileAreaId] = useState(() => loadLocalPrefs().mobileAreaId || null);
   const [mobileTaskId, setMobileTaskId] = useState(null);
   const [mobileExpandedFilter, setMobileExpandedFilter] = useState(null); // null | "pendientes" | "vencidas"
   const [mobileSearch, setMobileSearch] = useState("");
@@ -638,12 +658,12 @@ export default function TaskTracker() {
   const areasSnapshotRef = useRef("[]"); // last-saved areas JSON, for diffing
   const taskSnapshotsRef = useRef(new Map()); // taskId -> last-saved JSON, for diffing
 
-  const [selectedAreaId, setSelectedAreaId] = useState("all");
+  const [selectedAreaId, setSelectedAreaId] = useState(() => loadLocalPrefs().selectedAreaId || "all");
   const [selectedProjectId, setSelectedProjectId] = useState(null);
   const [hideCompleted, setHideCompleted] = useState(true);
-  const [appLang, setAppLang] = useState("es");
-  const [weekStartsSunday, setWeekStartsSunday] = useState(false);
-  const [holidayCountry, setHolidayCountry] = useState("AR");
+  const [appLang, setAppLang] = useState(() => loadLocalPrefs().appLang || "es");
+  const [weekStartsSunday, setWeekStartsSunday] = useState(() => !!loadLocalPrefs().weekStartsSunday);
+  const [holidayCountry, setHolidayCountry] = useState(() => loadLocalPrefs().holidayCountry || "AR");
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState("texto");
   const [freeText, setFreeText] = useState("");
@@ -691,7 +711,7 @@ export default function TaskTracker() {
 
   const [deleteTarget, setDeleteTarget] = useState(null); // { type: 'area'|'project', id, areaId? }
 
-  const [view, setView] = useState("lista");
+  const [view, setView] = useState(() => (loadLocalPrefs().view === "calendario" ? "calendario" : "lista"));
   const [calView, setCalView] = useState("mes");
   const [calCursor, setCalCursor] = useState(() => {
     const t = new Date();
@@ -1266,6 +1286,33 @@ export default function TaskTracker() {
 
   const areaMap = useMemo(() => Object.fromEntries(areas.map((a) => [a.id, a])), [areas]);
 
+  useEffect(() => {
+    saveLocalPrefs({ appLang, weekStartsSunday, holidayCountry, view, selectedAreaId });
+  }, [appLang, weekStartsSunday, holidayCountry, view, selectedAreaId]);
+
+  useEffect(() => {
+    // Only remember "areas" (nivel 1) or "area" (nivel 2) as a landing spot —
+    // task detail and quickadd are transient, so falling back to the area
+    // screen they were opened from makes more sense than reopening those.
+    if (mobileScreen === "areas") {
+      saveLocalPrefs({ mobileScreen: "areas", mobileAreaId: null });
+    } else if (mobileAreaId) {
+      saveLocalPrefs({ mobileScreen: "area", mobileAreaId });
+    }
+  }, [mobileScreen, mobileAreaId]);
+
+  useEffect(() => {
+    if (bootStatus !== "ready" || !hasLoadedRef.current) return;
+    if (mobileAreaId && !areas.some((a) => a.id === mobileAreaId)) {
+      setMobileAreaId(null);
+      setMobileScreen("areas");
+    }
+    if (selectedAreaId !== "all" && !areas.some((a) => a.id === selectedAreaId)) {
+      setSelectedAreaId("all");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bootStatus, areas]);
+
   function isGeneralArea(area) {
     return !!area && area.name.trim().toLowerCase() === "general";
   }
@@ -1301,28 +1348,32 @@ export default function TaskTracker() {
   }, [tasks, selectedAreaId, selectedProjectId, hideCompleted, search, mobileCompletingIds]);
 
   const grouped = useMemo(() => {
+    const isSearching = !!search.trim();
     const byArea = {};
     visibleTasks.forEach((t) => {
       if (!byArea[t.areaId]) byArea[t.areaId] = [];
       byArea[t.areaId].push(t);
     });
     const relevantAreas = selectedAreaId === "all" ? orderedAreas : orderedAreas.filter((a) => a.id === selectedAreaId);
-    return relevantAreas.map((a) => {
-      const allTasks = byArea[a.id] || [];
-      const byProject = {};
-      const noProject = [];
-      allTasks.forEach((t) => {
-        if (t.projectId) {
-          if (!byProject[t.projectId]) byProject[t.projectId] = [];
-          byProject[t.projectId].push(t);
-        } else {
-          noProject.push(t);
-        }
-      });
-      const projectGroups = (a.projects || []).map((p) => ({ project: p, tasks: byProject[p.id] || [] }));
-      return { area: a, allTasks, noProject, projectGroups };
-    });
-  }, [visibleTasks, orderedAreas, selectedAreaId]);
+    return relevantAreas
+      .map((a) => {
+        const allTasks = byArea[a.id] || [];
+        const byProject = {};
+        const noProject = [];
+        allTasks.forEach((t) => {
+          if (t.projectId) {
+            if (!byProject[t.projectId]) byProject[t.projectId] = [];
+            byProject[t.projectId].push(t);
+          } else {
+            noProject.push(t);
+          }
+        });
+        let projectGroups = (a.projects || []).map((p) => ({ project: p, tasks: byProject[p.id] || [] }));
+        if (isSearching) projectGroups = projectGroups.filter((g) => g.tasks.length > 0);
+        return { area: a, allTasks, noProject, projectGroups };
+      })
+      .filter((g) => !isSearching || g.allTasks.length > 0);
+  }, [visibleTasks, orderedAreas, selectedAreaId, search]);
 
   const groupedByPriority = useMemo(() => {
     const buckets = { Alta: [], Media: [], Baja: [] };
@@ -1898,7 +1949,7 @@ export default function TaskTracker() {
       <button className="m-task-icons" onClick={() => openMobileTask(t.id, t.areaId)} title="Ver detalle">
         <Flag size={15} className={`m-flag m-flag--${t.priority}`} />
         {t.date && <CalendarIcon size={15} className={isOverdue(t.date, t.status) ? "m-cal m-cal--overdue" : "m-cal"} />}
-        <Info size={16} className="m-info-icon" />
+        <Info size={16} className={`m-info-icon ${t.status === "Hecho" ? "m-info-icon--done" : t.status === "Haciendo" ? "m-info-icon--doing" : ""}`} />
       </button>
     );
   }
@@ -2283,6 +2334,15 @@ export default function TaskTracker() {
             }
           }}
         >
+          {q ? (
+            <>
+              {tasks.filter((t) => t.areaId === area.id && matchesQuery(t)).length === 0 && (
+                <div className="m-empty-hint">Sin resultados para "{mobileSearch}"</div>
+              )}
+              {tasks.filter((t) => t.areaId === area.id && matchesQuery(t)).map(renderMobileTaskRow)}
+            </>
+          ) : (
+            <>
           {projects.map((p) => {
             const projectTaskCount = tasksOf(p.id).length;
             const collapsed = projectTaskCount > 0 && mobileCollapsedProjects.has(p.id);
@@ -2326,6 +2386,8 @@ export default function TaskTracker() {
             {generalTasks.map(renderMobileTaskRow)}
             {renderMobileInlineAdd(area.id, null)}
           </div>
+            </>
+          )}
         </div>
 
         {!isGeneralArea(area) && (
@@ -2539,7 +2601,7 @@ export default function TaskTracker() {
                       : <Circle size={14} color="var(--text-faint)" />}
                   </button>
                 </td>
-                <td className={indent ? "td-indent" : ""}>
+                <td className={`td-title ${indent ? "td-indent" : ""}`} onDoubleClick={() => { if (editingTitleId !== t.id) setEditingTitleId(t.id); }}>
                   {editingTitleId === t.id ? (
                     <input
                       autoFocus
@@ -2552,10 +2614,7 @@ export default function TaskTracker() {
                       }}
                     />
                   ) : (
-                    <span
-                      className={`task-title ${t.status === "Hecho" ? "task-title--done" : ""}`}
-                      onDoubleClick={() => setEditingTitleId(t.id)}
-                    >
+                    <span className={`task-title ${t.status === "Hecho" ? "task-title--done" : ""}`}>
                       {t.title}
                     </span>
                   )}
@@ -2908,7 +2967,7 @@ export default function TaskTracker() {
         .manual-area-fixed { display: flex; align-items: center; gap: 7px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; font-size: 13.5px; color: var(--text-dim); }
 
         /* ---- groups / table ---- */
-        .groups { flex: 1; overflow-y: auto; padding: 4px max(20px, calc((100% - 1320px) / 2)) 24px; }
+        .groups { flex: 1; overflow-y: auto; scrollbar-gutter: stable; padding: 4px max(20px, calc((100% - 1320px) / 2)) 24px; }
         .groups--first-view { padding-top: 18px; }
         .group { border: 1px solid var(--border); border-radius: 12px; margin-bottom: 16px; overflow: hidden; background: var(--surface); }
         .group-head { display: flex; align-items: center; gap: 10px; padding: 13px 16px; cursor: pointer; user-select: none; }
@@ -2963,6 +3022,7 @@ export default function TaskTracker() {
         .td-check--indent { padding-left: 18px; }
         .row-check { background: none; border: none; padding: 2px; display: inline-flex; cursor: pointer; }
         .td-detalle { text-align: center; }
+        .td-title { cursor: text; }
         .td-indent { padding-left: 18px; }
         .col-center { text-align: center; }
         .note-input { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; color: var(--text-dim); font-size: 13px; padding: 5px 8px 5px 3px; width: 85%; outline: none; }
@@ -3276,6 +3336,8 @@ export default function TaskTracker() {
           .m-cal { color: var(--text-faint); }
           .m-cal--overdue { color: var(--alta); }
           .m-info-icon { color: var(--text-faint); }
+          .m-info-icon--doing { color: var(--blue); }
+          .m-info-icon--done { color: var(--good); }
 
           .m-sticky-footer { padding: 10px 12px; border-top: 1px solid var(--border); flex-shrink: 0; }
 
