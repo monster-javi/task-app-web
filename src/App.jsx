@@ -140,6 +140,12 @@ function fmtDate(iso) {
   return `${d}/${m}/${y}`;
 }
 
+function maskEmail(email) {
+  if (!email) return "";
+  const at = email.indexOf("@");
+  return at === -1 ? email : email.slice(0, at) + "...";
+}
+
 function isOverdue(iso, status) {
   if (!iso || status === "Hecho") return false;
   return iso < todayISO();
@@ -538,14 +544,11 @@ function QuickAddRow({ placeholder, onAdd, indent, general }) {
         className={`quick-add-row quick-add-row--ghost ${indent ? "quick-add-row--indent" : ""}`}
         onClick={() => setActive(true)}
         title={general ? "Agregar tarea general (sin proyecto)" : "Agregar tarea"}
-      >
-        <span className={`quick-add-ghost-dot ${general ? "quick-add-ghost-dot--general" : ""}`} />
-      </div>
+      />
     );
   }
   return (
     <div className={`quick-add-row ${indent ? "quick-add-row--indent" : ""}`}>
-      <Plus size={12} className="quick-add-icon" />
       <input
         autoFocus
         type="text"
@@ -610,6 +613,7 @@ export default function TaskTracker() {
   const mobileSwipeRef = useRef({ x: 0, y: 0, tracking: false });
   const [mobileCompletingIds, setMobileCompletingIds] = useState(() => new Set());
   const [mobileRevealedTaskId, setMobileRevealedTaskId] = useState(null);
+  const [mobileRevealedAreaId, setMobileRevealedAreaId] = useState(null);
   const [mobileQuickAddProjectId, setMobileQuickAddProjectId] = useState(null);
   const [mobileDraggingTaskId, setMobileDraggingTaskId] = useState(null);
   const [mobileCollapsedProjects, setMobileCollapsedProjects] = useState(() => new Set());
@@ -644,6 +648,9 @@ export default function TaskTracker() {
   const [editingTitleId, setEditingTitleId] = useState(null);
   const freshTaskIdRef = useRef(null);
   const titleKeyHandledRef = useRef(null);
+  const areaKeyHandledRef = useRef(false);
+  const projectKeyHandledRef = useRef(false);
+  const inlineAddEscapedRef = useRef(false);
 
   const [manualTitle, setManualTitle] = useState("");
   const [manualArea, setManualArea] = useState("");
@@ -948,6 +955,29 @@ export default function TaskTracker() {
     clearTimeout(saveRetryRef.current.timer);
     setSaving(true);
     try {
+      // Conflict check: did another device/tab save since we last synced?
+      // With two clients editing in parallel, blindly overwriting on a timer
+      // is exactly how a change "disappears" — pull theirs in first and let
+      // this edit cycle re-save on top of it instead of clobbering it.
+      const { data: currentRow } = await supabase.from("app_data").select("data,updated_at").maybeSingle();
+      if (currentRow && new Date(currentRow.updated_at).getTime() > lastAppliedUpdatedAtRef.current) {
+        lastAppliedUpdatedAtRef.current = new Date(currentRow.updated_at).getTime();
+        let incoming = currentRow.data;
+        if (incoming && incoming.encrypted && encryptionKeyRef.current) {
+          incoming = await decryptPayload(encryptionKeyRef.current, incoming);
+        }
+        if (incoming && !currentRow.data.encrypted) {
+          setAreas(incoming.areas || []);
+          setTasks(incoming.tasks || []);
+        } else if (incoming && currentRow.data.encrypted && encryptionKeyRef.current) {
+          setAreas(incoming.areas || []);
+          setTasks(incoming.tasks || []);
+        }
+        showToast("Se sincronizó un cambio hecho desde otro dispositivo");
+        setSaving(false);
+        return; // the state update above will trigger a fresh, merged autosave
+      }
+
       const updatedAt = new Date().toISOString();
       // Mark this write as "ours" *before* it goes out — the realtime echo for
       // it can arrive over the websocket faster than this same request's own
@@ -1340,9 +1370,8 @@ export default function TaskTracker() {
 
   function createArea() {
     const name = newAreaName.trim();
-    if (name) selectArea(ensureArea(name));
+    if (name) ensureArea(name);
     setNewAreaName("");
-    setAddingArea(false);
   }
 
   function createAreaFromPanel() {
@@ -1778,6 +1807,24 @@ export default function TaskTracker() {
     );
   }
 
+  function areaSwipeHandlers(areaId) {
+    const state = { x: 0, y: 0 };
+    return {
+      onTouchStart: (e) => {
+        const touch = e.touches[0];
+        state.x = touch.clientX; state.y = touch.clientY;
+      },
+      onTouchEnd: (e) => {
+        const touch = e.changedTouches[0];
+        const dx = touch.clientX - state.x;
+        const dy = Math.abs(touch.clientY - state.y);
+        if (dy > 60) return;
+        if (dx < -50) setMobileRevealedAreaId(areaId);
+        else if (dx > 50 && mobileRevealedAreaId === areaId) setMobileRevealedAreaId(null);
+      },
+    };
+  }
+
   function renderMobileAreasScreen() {
     const q = mobileSearch.trim().toLowerCase();
     const matchedAreas = q ? areas.filter((a) => a.name.toLowerCase().includes(q)) : [];
@@ -1821,7 +1868,19 @@ export default function TaskTracker() {
           </div>
         </div>
 
-        <div className="m-list">
+        <div
+          className="m-list"
+          onClick={(e) => {
+            if (mobileRevealedAreaId) setMobileRevealedAreaId(null);
+            if (e.target === e.currentTarget) {
+              const generalArea = areas.find((a) => isGeneralArea(a));
+              const generalId = generalArea ? generalArea.id : ensureArea("General");
+              openMobileArea(generalId);
+              setMobileInlineAddKey(`${generalId}:general`);
+              setMobileInlineAddText("");
+            }
+          }}
+        >
           {q ? (
             <>
               {matchedAreas.length === 0 && matchedTasks.length === 0 && <div className="m-empty-hint">Sin resultados para "{mobileSearch}"</div>}
@@ -1864,8 +1923,16 @@ export default function TaskTracker() {
                       onBlur={commitRename}
                     />
                   </div>
+                ) : mobileRevealedAreaId === a.id ? (
+                  <div key={a.id} className="m-area-card m-area-card--revealed">
+                    <span className="m-area-bar" style={{ background: a.color }} />
+                    <span className="m-area-name">{a.name.toUpperCase()}</span>
+                    <button className="m-row-delete" onClick={() => setDeleteTarget({ type: "area", id: a.id })}>
+                      <Trash2 size={16} /> Eliminar
+                    </button>
+                  </div>
                 ) : (
-                  <button key={a.id} className="m-area-card" onClick={() => openMobileArea(a.id)}>
+                  <button key={a.id} className="m-area-card" onClick={() => openMobileArea(a.id)} {...areaSwipeHandlers(a.id)}>
                     <span className="m-area-bar" style={{ background: a.color }} />
                     <span className="m-area-name">{a.name.toUpperCase()}</span>
                     <span className="m-area-count">{mobileCountFor(a.id)} pendientes</span>
@@ -1882,10 +1949,14 @@ export default function TaskTracker() {
                     value={mobileNewAreaName}
                     onChange={(e) => setMobileNewAreaName(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter") { const n = mobileNewAreaName.trim(); if (n) ensureArea(n); setMobileNewAreaName(""); setMobileAddingArea(false); }
-                      if (e.key === "Escape") { setMobileNewAreaName(""); setMobileAddingArea(false); }
+                      if (e.key === "Enter") { areaKeyHandledRef.current = true; const n = mobileNewAreaName.trim(); if (n) ensureArea(n); setMobileNewAreaName(""); setMobileAddingArea(false); }
+                      if (e.key === "Escape") { areaKeyHandledRef.current = true; setMobileNewAreaName(""); setMobileAddingArea(false); }
                     }}
-                    onBlur={() => { setMobileNewAreaName(""); setMobileAddingArea(false); }}
+                    onBlur={() => {
+                      if (areaKeyHandledRef.current) { areaKeyHandledRef.current = false; return; }
+                      const n = mobileNewAreaName.trim(); if (n) ensureArea(n);
+                      setMobileNewAreaName(""); setMobileAddingArea(false);
+                    }}
                   />
                 </div>
               ) : (
@@ -1894,7 +1965,7 @@ export default function TaskTracker() {
 
               <div className="m-account-row">
                 <div>
-                  <div className="m-account-name">{session?.user?.is_anonymous ? "Invitado" : (session?.user?.email || "")}</div>
+                  <div className="m-account-name">{session?.user?.is_anonymous ? "Invitado" : (maskEmail(session?.user?.email))}</div>
                   <div className="m-account-sub">{session?.user?.is_anonymous ? "Sesión de prueba" : "Con cuenta"}</div>
                 </div>
                 <button className="m-account-logout" onClick={handleLogout}>Salir</button>
@@ -1936,9 +2007,12 @@ export default function TaskTracker() {
           onChange={(e) => setMobileInlineAddText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") { e.preventDefault(); submitAndContinue(); }
-            if (e.key === "Escape") setMobileInlineAddKey(null);
+            if (e.key === "Escape") { inlineAddEscapedRef.current = true; setMobileInlineAddKey(null); }
           }}
-          onBlur={() => setMobileInlineAddKey(null)}
+          onBlur={() => {
+            if (inlineAddEscapedRef.current) { inlineAddEscapedRef.current = false; return; }
+            submitAndContinue();
+          }}
         />
       </div>
     );
@@ -2037,10 +2111,14 @@ export default function TaskTracker() {
                   value={mobileNewProjectName}
                   onChange={(e) => setMobileNewProjectName(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") { createProjectWithName(area.id, mobileNewProjectName); setMobileNewProjectName(""); setMobileAddingProjectAreaId(null); }
-                    if (e.key === "Escape") { setMobileNewProjectName(""); setMobileAddingProjectAreaId(null); }
+                    if (e.key === "Enter") { projectKeyHandledRef.current = true; createProjectWithName(area.id, mobileNewProjectName); setMobileNewProjectName(""); setMobileAddingProjectAreaId(null); }
+                    if (e.key === "Escape") { projectKeyHandledRef.current = true; setMobileNewProjectName(""); setMobileAddingProjectAreaId(null); }
                   }}
-                  onBlur={() => { setMobileNewProjectName(""); setMobileAddingProjectAreaId(null); }}
+                  onBlur={() => {
+                    if (projectKeyHandledRef.current) { projectKeyHandledRef.current = false; return; }
+                    createProjectWithName(area.id, mobileNewProjectName);
+                    setMobileNewProjectName(""); setMobileAddingProjectAreaId(null);
+                  }}
                 />
               </div>
             ) : (
@@ -2188,6 +2266,7 @@ export default function TaskTracker() {
             value={mobileQuickAddText}
             onChange={(e) => setMobileQuickAddText(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+            onBlur={submit}
           />
           <button className="m-quickadd-send" onClick={submit}><Plus size={18} /></button>
         </div>
@@ -2621,12 +2700,8 @@ export default function TaskTracker() {
         .subgroup-count { font-size: 11.5px; color: var(--text-dim); background: var(--surface-2); padding: 3px 9px; border-radius: 999px; }
 
         .quick-add-row { display: flex; align-items: center; gap: 8px; padding: 9px 16px; border-top: 1px solid var(--border); }
-        .quick-add-row--ghost { cursor: text; min-height: 32px; border-top: none; padding: 4px 16px; }
-        .quick-add-ghost-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); opacity: 0.12; }
-        .quick-add-ghost-dot--general { border-radius: 2px; }
-        .quick-add-row--ghost:hover .quick-add-ghost-dot { opacity: 0.35; }
+        .quick-add-row--ghost { cursor: text; border-top: 1px solid var(--border); }
         .quick-add-row--indent { padding-left: 40px; }
-        .quick-add-icon { color: var(--text-faint); flex-shrink: 0; opacity: 0.7; }
         .quick-add-input { flex: 1; background: none; border: none; outline: none; color: var(--text-dim); font-size: 13.5px; }
         .quick-add-input::placeholder { color: var(--text-faint); }
         .quick-add-input:focus { color: var(--text); }
@@ -2941,6 +3016,7 @@ export default function TaskTracker() {
           }
           .m-task-row--dragging { z-index: 10; box-shadow: 0 6px 16px rgba(0,0,0,0.4); border-radius: 8px; background: var(--surface); }
           .m-task-row--revealed { background: rgba(240,85,75,0.06); }
+          .m-area-card--revealed { background: rgba(240,85,75,0.06); }
           .m-row-delete {
             flex-shrink: 0; display: flex; align-items: center; gap: 6px; background: var(--alta); color: #fff;
             border: none; border-radius: 8px; padding: 9px 14px; font-size: 13px; font-weight: 700;
@@ -3176,7 +3252,7 @@ export default function TaskTracker() {
 
         <div className="account-row">
           <div className="account-info">
-            <div className="account-name">{session?.user?.is_anonymous ? "Invitado" : (session?.user?.email || "")}</div>
+            <div className="account-name">{session?.user?.is_anonymous ? "Invitado" : (maskEmail(session?.user?.email))}</div>
             <div className="account-sub">{session?.user?.is_anonymous ? "Sesión de prueba" : "Con cuenta"}</div>
           </div>
           <button className="account-logout" onClick={handleLogout} title="Cerrar sesión">Salir</button>
