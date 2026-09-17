@@ -85,6 +85,7 @@ const MONTH_LABELS = [
   "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
   "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
 ];
+const MONTH_ABBR = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
 const WEEKDAY_FULL_BY_JSDAY = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
 
 // ---------- generic helpers ----------
@@ -717,6 +718,9 @@ export default function TaskTracker() {
     const t = new Date();
     return { year: t.getFullYear(), month: t.getMonth() };
   });
+  const [showMonthPicker, setShowMonthPicker] = useState(false);
+  const [pickerYear, setPickerYear] = useState(() => new Date().getFullYear());
+  const monthPickerRef = useRef(null);
   const [weekAnchor, setWeekAnchor] = useState(todayISO());
   const [dayAnchor, setDayAnchor] = useState(todayISO());
   const [selectedDay, setSelectedDay] = useState(todayISO());
@@ -855,6 +859,7 @@ export default function TaskTracker() {
           if (row.key === "areas") newAreas = value || [];
           else if (row.key.startsWith("task:")) tasksArr.push(value);
         }
+        tasksArr.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
         setAreas(newAreas);
         setTasks(tasksArr);
         areasSnapshotRef.current = JSON.stringify(newAreas);
@@ -1633,9 +1638,29 @@ export default function TaskTracker() {
     setPanelAddingArea(false);
   }
 
+  const orderCounterRef = useRef(Date.now());
+  function nextOrder() {
+    orderCounterRef.current += 1;
+    return orderCounterRef.current;
+  }
+
+  function orderBetween(list, idx) {
+    const prevOrder = idx > 0 ? (list[idx - 1].order ?? 0) : null;
+    const nextOrder = idx < list.length - 1 ? (list[idx + 1].order ?? null) : null;
+    if (prevOrder != null && nextOrder != null) return (prevOrder + nextOrder) / 2;
+    if (prevOrder != null) return prevOrder + 1000;
+    if (nextOrder != null) return nextOrder - 1000;
+    return nextOrder ? nextOrder - 1000 : Date.now();
+  }
+
   function handleDropOnTarget(areaId, projectId) {
     if (!draggedTaskId) return;
-    setTasks((prev) => prev.map((t) => (t.id === draggedTaskId ? { ...t, areaId, projectId } : t)));
+    setTasks((prev) => {
+      const groupMax = prev.reduce((max, t) => (
+        t.areaId === areaId && t.projectId === projectId && t.id !== draggedTaskId ? Math.max(max, t.order ?? 0) : max
+      ), 0);
+      return prev.map((t) => (t.id === draggedTaskId ? { ...t, areaId, projectId, order: groupMax + 1000 } : t));
+    });
     setDraggedTaskId(null);
     setDragOverKey(null);
   }
@@ -1648,9 +1673,15 @@ export default function TaskTracker() {
       if (fromIdx === -1 || !targetTask) return prev;
       const list = [...prev];
       const [moved] = list.splice(fromIdx, 1);
-      const movedUpdated = { ...moved, areaId: targetTask.areaId, projectId: targetTask.projectId };
       const toIdx = list.findIndex((t) => t.id === beforeTaskId);
-      list.splice(toIdx === -1 ? list.length : toIdx, 0, movedUpdated);
+      const insertIdx = toIdx === -1 ? list.length : toIdx;
+      const movedUpdated = {
+        ...moved,
+        areaId: targetTask.areaId,
+        projectId: targetTask.projectId,
+        order: orderBetween(list, insertIdx),
+      };
+      list.splice(insertIdx, 0, movedUpdated);
       return list;
     });
     setDraggedTaskId(null);
@@ -1705,8 +1736,9 @@ export default function TaskTracker() {
     for (let i = 0; i < list.length; i++) {
       if (list[i].areaId === newTask.areaId && list[i].projectId === newTask.projectId) lastIdx = i;
     }
+    const taggedTask = { ...newTask, order: newTask.order ?? nextOrder() };
     const copy = [...list];
-    copy.splice(lastIdx + 1, 0, newTask);
+    copy.splice(lastIdx + 1, 0, taggedTask);
     return copy;
   }
 
@@ -1797,6 +1829,30 @@ export default function TaskTracker() {
 
   function changeWeek(delta) { setWeekAnchor((a) => addDaysISO(a, delta * 7)); }
   function changeDay(delta) { setDayAnchor((a) => addDaysISO(a, delta)); }
+
+  useEffect(() => {
+    if (!showMonthPicker) return;
+    function onDocClick(e) {
+      if (monthPickerRef.current && !monthPickerRef.current.contains(e.target)) setShowMonthPicker(false);
+    }
+    function onKey(e) { if (e.key === "Escape") setShowMonthPicker(false); }
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [showMonthPicker]);
+
+  function openMonthPicker() {
+    setPickerYear(calCursor.year);
+    setShowMonthPicker(true);
+  }
+
+  function pickMonth(monthIdx) {
+    setCalCursor({ year: pickerYear, month: monthIdx });
+    setShowMonthPicker(false);
+  }
 
   function goToday() {
     const t = todayISO();
@@ -1969,6 +2025,7 @@ export default function TaskTracker() {
           mobileSwipeRef.current.tracking = false; // long-press claims the gesture; cancel swipe/back
           setMobileDraggingTaskId(t.id);
           setMobileDragOffsetY(0);
+          if (navigator.vibrate) navigator.vibrate(10);
         }, 450);
       },
       onTouchMove: (e) => {
@@ -2033,9 +2090,25 @@ export default function TaskTracker() {
               autoFocus
               className="m-task-title-input"
               defaultValue={t.title}
-              onBlur={() => {
+              onBlur={(e) => {
                 if (titleKeyHandledRef.current === t.id) { titleKeyHandledRef.current = null; return; }
-                discardTitleEditing(t.id);
+                const textAtBlur = e.target.value;
+                mobileScreenTapRef.current = false;
+                setTimeout(() => {
+                  const wasScreenTap = mobileScreenTapRef.current;
+                  mobileScreenTapRef.current = false;
+                  // The keyboard's own "visto"/checkmark just blurs with no
+                  // click following it — if there's text, that's a confirm,
+                  // so save the edit (but don't chain a new task, unlike
+                  // Enter). A tap on the empty screen elsewhere always fires
+                  // a click right after the blur — that's always a discard.
+                  if (!wasScreenTap && textAtBlur.trim()) {
+                    if (freshTaskIdRef.current === t.id) freshTaskIdRef.current = null;
+                    commitTaskTitle(t.id, textAtBlur);
+                  } else {
+                    discardTitleEditing(t.id);
+                  }
+                }, 0);
               }}
               onKeyDown={(e) => {
                 if (e.key === "Enter") { e.preventDefault(); titleKeyHandledRef.current = t.id; commitTitleAndAddNext(t, e.target.value); }
@@ -2939,7 +3012,7 @@ export default function TaskTracker() {
         .notif-row-meta { font-size: 12px; color: var(--text-faint); }
 
         /* ---- input card ---- */
-        .input-card { width: calc(100% - 40px); margin: 18px auto 6px; max-width: 1320px; min-height: 158px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface); }
+        .input-card { width: calc(100% - 40px); margin: 18px auto 6px; max-width: 1320px; height: 190px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface); }
         .tabs { display: flex; border-bottom: 1px solid var(--border); }
         .tab-btn { padding: 11px 16px; font-size: 13.5px; color: var(--text-faint); background: none; border: none; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
         .tab-btn--active { color: var(--text); border-bottom-color: var(--amber); }
@@ -2967,7 +3040,7 @@ export default function TaskTracker() {
         .manual-area-fixed { display: flex; align-items: center; gap: 7px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; font-size: 13.5px; color: var(--text-dim); }
 
         /* ---- groups / table ---- */
-        .groups { flex: 1; overflow-y: auto; scrollbar-gutter: stable; padding: 4px max(20px, calc((100% - 1320px) / 2)) 24px; }
+        .groups { flex: 1; overflow-y: auto; width: calc(100% - 40px); max-width: 1320px; margin: 0 auto; padding: 4px 0 24px; }
         .groups--first-view { padding-top: 18px; }
         .group { border: 1px solid var(--border); border-radius: 12px; margin-bottom: 16px; overflow: hidden; background: var(--surface); }
         .group-head { display: flex; align-items: center; gap: 10px; padding: 13px 16px; cursor: pointer; user-select: none; }
@@ -3022,7 +3095,7 @@ export default function TaskTracker() {
         .td-check--indent { padding-left: 18px; }
         .row-check { background: none; border: none; padding: 2px; display: inline-flex; cursor: pointer; }
         .td-detalle { text-align: center; }
-        .td-title { cursor: text; }
+        .td-title { }
         .td-indent { padding-left: 18px; }
         .col-center { text-align: center; }
         .note-input { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; color: var(--text-dim); font-size: 13px; padding: 5px 8px 5px 3px; width: 85%; outline: none; }
@@ -3112,11 +3185,26 @@ export default function TaskTracker() {
 
         /* ---- calendar ---- */
         .calendar-wrap { flex: 1; overflow-y: auto; padding: 18px 20px 24px; display: flex; flex-direction: column; }
-        .cal-toolbar { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; flex-wrap: wrap; }
-        .cal-nav { display: flex; align-items: center; gap: 10px; }
-        .cal-nav-btn { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 7px; border: 1px solid var(--border); background: var(--surface); color: var(--text-dim); cursor: pointer; }
+        .cal-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+        .cal-today-btn { font-weight: 700; }
+        .cal-nav { display: flex; align-items: center; gap: 8px; }
+        .cal-nav-btn { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 7px; border: 1px solid var(--border); background: var(--surface); color: var(--text-dim); cursor: pointer; flex-shrink: 0; }
         .cal-nav-btn:hover { color: var(--text); border-color: #33383f; }
-        .cal-month-label { font-size: 15.5px; font-weight: 700; min-width: 150px; letter-spacing: -0.01em; }
+        .cal-month-label { font-size: 16px; font-weight: 700; min-width: 160px; letter-spacing: -0.01em; text-align: center; }
+        .cal-month-label--clickable { background: none; border: 1px solid transparent; border-radius: 8px; padding: 5px 10px; cursor: pointer; color: var(--text); }
+        .cal-month-label--clickable:hover { background: var(--surface); border-color: var(--border); }
+        .month-picker-wrap { position: relative; }
+        .month-picker-pop {
+          position: absolute; top: calc(100% + 6px); left: 50%; transform: translateX(-50%); z-index: 40;
+          background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; padding: 12px;
+          box-shadow: 0 16px 40px rgba(0,0,0,0.45); width: 240px;
+        }
+        .month-picker-header { display: flex; align-items: center; justify-content: center; gap: 12px; margin-bottom: 10px; }
+        .month-picker-year { font-size: 14px; font-weight: 700; min-width: 44px; text-align: center; }
+        .month-picker-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+        .month-picker-cell { padding: 8px 0; font-size: 12.5px; font-weight: 600; color: var(--text-dim); background: var(--surface); border: 1px solid var(--border); border-radius: 7px; cursor: pointer; }
+        .month-picker-cell:hover { color: var(--text); border-color: #33383f; }
+        .month-picker-cell--selected { background: var(--amber); color: #1a1305; border-color: var(--amber); }
         .cal-view-switch { display: flex; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 2px; }
         .seg-btn { padding: 6px 12px; font-size: 12.5px; color: var(--text-dim); background: none; border: none; border-radius: 6px; cursor: pointer; }
         .seg-btn--active { background: var(--surface-2); color: var(--text); }
@@ -3131,6 +3219,7 @@ export default function TaskTracker() {
         .cal-day:hover { border-color: #33383f; }
         .cal-day--out { opacity: 0.35; }
         .cal-day--today { border-color: rgba(232,163,61,0.6); }
+        .cal-day--holiday { background: rgba(0,0,0,0.18); }
         .cal-day--selected { background: var(--surface-2); border-color: var(--amber); box-shadow: 0 0 0 1px var(--amber); }
         .cal-day-num { font-size: 12.5px; color: var(--text-dim); }
         .cal-day--today .cal-day-num { color: var(--amber); font-weight: 700; }
@@ -3310,6 +3399,7 @@ export default function TaskTracker() {
           .m-task-row {
             display: flex; align-items: center; gap: 16px; padding: 12px 4px;
             border-bottom: 1px solid var(--border); position: relative; background: var(--bg);
+            -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
           }
           .m-task-row--dragging { z-index: 10; box-shadow: 0 6px 16px rgba(0,0,0,0.4); border-radius: 8px; background: var(--surface); }
           .m-task-row--revealed { background: rgba(240,85,75,0.06); }
@@ -3863,13 +3953,41 @@ export default function TaskTracker() {
         ) : (
           <div className="calendar-wrap">
             <div className="cal-toolbar">
+              <button className="iconbtn cal-today-btn" onClick={goToday}>Hoy</button>
               <div className="cal-nav">
                 <button className="cal-nav-btn" onClick={() => goPrevNext(-1)}><ChevronLeft size={16} /></button>
-                <div className="cal-month-label">
-                  {calView === "mes" && `${MONTH_LABELS[calCursor.month]} ${calCursor.year}`}
-                  {calView === "semana" && `${fmtDate(weekDays[0].iso)} – ${fmtDate(weekDays[6].iso)}`}
-                  {calView === "dia" && `${weekdayFullOf(dayAnchor)} ${fmtDate(dayAnchor)}`}
-                </div>
+                {calView === "mes" ? (
+                  <div className="month-picker-wrap" ref={monthPickerRef}>
+                    <button className="cal-month-label cal-month-label--clickable" onClick={() => (showMonthPicker ? setShowMonthPicker(false) : openMonthPicker())}>
+                      {MONTH_LABELS[calCursor.month]} {calCursor.year}
+                    </button>
+                    {showMonthPicker && (
+                      <div className="month-picker-pop">
+                        <div className="month-picker-header">
+                          <button className="cal-nav-btn" onClick={() => setPickerYear((y) => y - 1)}><ChevronLeft size={14} /></button>
+                          <span className="month-picker-year">{pickerYear}</span>
+                          <button className="cal-nav-btn" onClick={() => setPickerYear((y) => y + 1)}><ChevronRight size={14} /></button>
+                        </div>
+                        <div className="month-picker-grid">
+                          {MONTH_ABBR.map((m, i) => (
+                            <button
+                              key={m}
+                              className={`month-picker-cell ${pickerYear === calCursor.year && i === calCursor.month ? "month-picker-cell--selected" : ""}`}
+                              onClick={() => pickMonth(i)}
+                            >
+                              {m}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="cal-month-label">
+                    {calView === "semana" && `${fmtDate(weekDays[0].iso)} – ${fmtDate(weekDays[6].iso)}`}
+                    {calView === "dia" && `${weekdayFullOf(dayAnchor)} ${fmtDate(dayAnchor)}`}
+                  </div>
+                )}
                 <button className="cal-nav-btn" onClick={() => goPrevNext(1)}><ChevronRight size={16} /></button>
               </div>
               <div className="cal-view-switch">
@@ -3879,7 +3997,6 @@ export default function TaskTracker() {
               </div>
               <div className="cal-toolbar-spacer" />
               {calView === "mes" && <span className="cal-kbd-hint">← → ↑ ↓ navegan · Inicio = hoy</span>}
-              <button className="iconbtn" onClick={goToday}>Hoy</button>
             </div>
 
             {calView === "mes" && (
@@ -3893,7 +4010,7 @@ export default function TaskTracker() {
                   return (
                     <div
                       key={cell.iso}
-                      className={`cal-day ${!cell.inMonth ? "cal-day--out" : ""} ${isToday ? "cal-day--today" : ""} ${isSelected ? "cal-day--selected" : ""}`}
+                      className={`cal-day ${!cell.inMonth ? "cal-day--out" : ""} ${isToday ? "cal-day--today" : ""} ${isSelected ? "cal-day--selected" : ""} ${holidayName ? "cal-day--holiday" : ""}`}
                       onClick={() => setSelectedDay(cell.iso)}
                       title={holidayName || undefined}
                     >
