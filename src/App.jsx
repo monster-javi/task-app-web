@@ -553,7 +553,7 @@ function QuickAddRow({ placeholder, onAdd, indent, general }) {
         autoFocus
         type="text"
         className="quick-add-input"
-        placeholder={placeholder || (general ? "Nueva tarea general..." : "Nueva tarea...")}
+        placeholder={placeholder || (general ? "Nueva tarea general" : "Nueva tarea")}
         value={val}
         onChange={(e) => setVal(e.target.value)}
         onKeyDown={(e) => {
@@ -655,6 +655,7 @@ export default function TaskTracker() {
   const areaKeyHandledRef = useRef(false);
   const projectKeyHandledRef = useRef(false);
   const inlineAddEscapedRef = useRef(false);
+  const mobileScreenTapRef = useRef(false);
 
   const [manualTitle, setManualTitle] = useState("");
   const [manualArea, setManualArea] = useState("");
@@ -2216,12 +2217,24 @@ export default function TaskTracker() {
           onChange={(e) => setMobileInlineAddText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") { e.preventDefault(); submitAndContinue(); }
-            if (e.key === "Escape") { inlineAddEscapedRef.current = true; setMobileInlineAddKey(null); }
+            if (e.key === "Escape") { inlineAddEscapedRef.current = true; setMobileInlineAddKey(null); setMobileInlineAddText(""); }
           }}
           onBlur={() => {
-            if (inlineAddEscapedRef.current) { inlineAddEscapedRef.current = false; return; }
-            setMobileInlineAddKey(null);
-            setMobileInlineAddText("");
+            if (inlineAddEscapedRef.current) { inlineAddEscapedRef.current = false; setMobileInlineAddKey(null); setMobileInlineAddText(""); return; }
+            const textAtBlur = mobileInlineAddText;
+            mobileScreenTapRef.current = false;
+            setTimeout(() => {
+              const wasScreenTap = mobileScreenTapRef.current;
+              mobileScreenTapRef.current = false;
+              const clean = textAtBlur.trim();
+              // The keyboard's own "visto"/checkmark just blurs with no click
+              // following it — if there's text, that's a confirm, so create
+              // the task. A tap on the empty screen elsewhere always fires a
+              // click right after the blur — that's always a discard.
+              if (!wasScreenTap && clean) addQuickTask(areaId, projectId, clean);
+              setMobileInlineAddKey(null);
+              setMobileInlineAddText("");
+            }, 0);
           }}
         />
       </div>
@@ -2261,8 +2274,12 @@ export default function TaskTracker() {
           onClick={(e) => {
             if (mobileRevealedTaskId) setMobileRevealedTaskId(null);
             if (e.target === e.currentTarget) {
-              setMobileInlineAddKey(`${area.id}:general`);
-              setMobileInlineAddText("");
+              mobileScreenTapRef.current = true;
+              const key = `${area.id}:general`;
+              if (mobileInlineAddKey !== key) {
+                setMobileInlineAddKey(key);
+                setMobileInlineAddText("");
+              }
             }
           }}
         >
@@ -2460,14 +2477,6 @@ export default function TaskTracker() {
             </select>
           )}
         </div>
-        <div className="m-list">
-          {recent.map((t) => (
-            <div key={t.id} className="m-quickadd-item">
-              <Circle size={14} color="var(--text-faint)" />
-              {t.title}
-            </div>
-          ))}
-        </div>
         <div className="m-quickadd-input-row">
           <input
             autoFocus
@@ -2475,8 +2484,17 @@ export default function TaskTracker() {
             value={mobileQuickAddText}
             onChange={(e) => setMobileQuickAddText(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+            onBlur={() => { if (mobileQuickAddText.trim()) submit(); }}
           />
           <button className="m-quickadd-send" onClick={submit}><Plus size={18} /></button>
+        </div>
+        <div className="m-list">
+          {recent.map((t) => (
+            <div key={t.id} className="m-quickadd-item">
+              <Circle size={14} color="var(--text-faint)" />
+              {t.title}
+            </div>
+          ))}
         </div>
       </div>
     );
@@ -2899,8 +2917,8 @@ export default function TaskTracker() {
         .group-count { font-size: 12px; color: var(--text-dim); background: var(--surface-2); padding: 4px 9px; border-radius: 999px; }
         .chev { color: var(--text-faint); }
 
-        .subgroup { border-top: 2px solid var(--border); margin-top: 4px; }
-        .subgroup-head { display: flex; align-items: center; gap: 8px; padding: 10px 16px; cursor: pointer; user-select: none; }
+        .subgroup { }
+        .subgroup-head { display: flex; align-items: center; gap: 8px; padding: 10px 16px 10px 26px; cursor: pointer; user-select: none; }
         .subgroup-head:hover { background: var(--surface-2); }
         .subgroup-chev { display: flex; color: var(--text-dim); flex-shrink: 0; }
         .subgroup-dot { width: 6px; height: 6px; border-radius: 50%; }
@@ -3077,6 +3095,13 @@ export default function TaskTracker() {
         /* ---- modal ---- */
         .modal-overlay { position: absolute; inset: 0; background: rgba(4,5,7,0.72); display: flex; align-items: center; justify-content: center; z-index: 70; }
         .modal-card { position: relative; width: 320px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; padding: 20px; box-shadow: 0 20px 48px rgba(0,0,0,0.5); }
+        .settings-modal-card { width: 540px; max-width: 90vw; padding: 28px 32px; border-radius: 14px; }
+        .settings-modal-card .modal-title { font-size: 17px; margin-bottom: 18px; }
+        .settings-modal-card .settings-group-title:first-of-type { margin-top: 0; }
+        .settings-modal-card .settings-row { padding: 16px 0; gap: 24px; }
+        .settings-modal-card .settings-row-title { font-size: 15px; }
+        .settings-modal-card .settings-row-desc { max-width: 340px; }
+        .settings-modal-card .settings-select { min-width: 190px; }
         .modal-close {
           position: absolute; top: 12px; right: 12px; background: none; border: none; color: var(--text-faint);
           cursor: pointer; padding: 4px; border-radius: 6px; display: flex;
@@ -3282,7 +3307,7 @@ export default function TaskTracker() {
             color: var(--text); font-size: 14px; font-weight: 700; padding: 8px 10px;
           }
           .m-quickadd-item { display: flex; align-items: center; gap: 10px; padding: 11px 4px; font-size: 14px; color: var(--text-dim); border-bottom: 1px solid var(--border); }
-          .m-quickadd-input-row { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border); flex-shrink: 0; }
+          .m-quickadd-input-row { display: flex; gap: 8px; padding: 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
           .m-quickadd-input-row input {
             flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
             padding: 12px 14px; color: var(--text); font-size: 15px; outline: none;
@@ -3683,7 +3708,7 @@ export default function TaskTracker() {
                               <>
                                 {projTasks.length > 0 && renderTaskTable(projTasks, { indent: true })}
                                 <QuickAddRow
-                                  placeholder="..."
+                                  placeholder=""
                                   onAdd={(title) => addQuickTask(area.id, project.id, title)}
                                   indent
                                 />
@@ -3699,7 +3724,7 @@ export default function TaskTracker() {
                         >
                           {noProject.length > 0 && renderTaskTable(noProject)}
                           <QuickAddRow
-                            placeholder="..."
+                            placeholder=""
                             onAdd={(title) => addQuickTask(area.id, null, title)}
                             general
                           />
@@ -4016,7 +4041,7 @@ export default function TaskTracker() {
 
       {showSettingsPanel && (
         <div className="modal-overlay" onClick={() => { setShowSettingsPanel(false); setConfirmingWipe(false); }}>
-          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+          <div className="modal-card settings-modal-card" onClick={(e) => e.stopPropagation()}>
             <button className="modal-close" onClick={() => { setShowSettingsPanel(false); setConfirmingWipe(false); }}><X size={16} /></button>
             <div className="modal-title">Configuración</div>
 
