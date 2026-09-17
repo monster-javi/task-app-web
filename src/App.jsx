@@ -643,7 +643,7 @@ export default function TaskTracker() {
   const [mobileInlineAddKey, setMobileInlineAddKey] = useState(null); // "areaId:projectId" or "areaId:general"
   const [mobileInlineAddText, setMobileInlineAddText] = useState("");
   const [mobileDragOffsetY, setMobileDragOffsetY] = useState(0);
-  const mobileLongPressRef = useRef({ timer: null, x: 0, y: 0, taskId: null, lastOverId: null });
+  const mobileLongPressRef = useRef({ timer: null, x: 0, y: 0, taskId: null, lastOverKey: null });
   const statusClickGuardRef = useRef({ id: null, time: 0 });
   const [showEncSettings, setShowEncSettings] = useState(false);
   const [encSettingsView, setEncSettingsView] = useState("status"); // status | disable-confirm | enable
@@ -1679,22 +1679,32 @@ export default function TaskTracker() {
     return orderCounterRef.current;
   }
 
-  function orderBetween(list, idx) {
-    const prevOrder = idx > 0 ? (list[idx - 1].order ?? 0) : null;
-    const nextOrder = idx < list.length - 1 ? (list[idx + 1].order ?? null) : null;
-    if (prevOrder != null && nextOrder != null) return (prevOrder + nextOrder) / 2;
-    if (prevOrder != null) return prevOrder + 1000;
-    if (nextOrder != null) return nextOrder - 1000;
-    return nextOrder ? nextOrder - 1000 : Date.now();
+  function reassignGroupOrder(list, areaId, projectId) {
+    // Give every task in this one area+project group a clean, unique,
+    // sequential order value based on its position in `list`. Interpolating
+    // fractions between neighbors forever can converge onto the same value
+    // for two different tasks (a tie), which is exactly the kind of thing
+    // that made some reorders silently fail to stick — a fresh, unambiguous
+    // renumbering on every move can't collide.
+    let n = 0;
+    return list.map((t) => {
+      if (t.areaId === areaId && t.projectId === projectId) {
+        n += 1;
+        return t.order === n * 1000 ? t : { ...t, order: n * 1000 };
+      }
+      return t;
+    });
   }
 
   function handleDropOnTarget(areaId, projectId) {
     if (!draggedTaskId) return;
     setTasks((prev) => {
-      const groupMax = prev.reduce((max, t) => (
-        t.areaId === areaId && t.projectId === projectId && t.id !== draggedTaskId ? Math.max(max, t.order ?? 0) : max
-      ), 0);
-      return prev.map((t) => (t.id === draggedTaskId ? { ...t, areaId, projectId, order: groupMax + 1000 } : t));
+      const fromIdx = prev.findIndex((t) => t.id === draggedTaskId);
+      if (fromIdx === -1) return prev;
+      const list = [...prev];
+      const [moved] = list.splice(fromIdx, 1);
+      list.push({ ...moved, areaId, projectId });
+      return reassignGroupOrder(list, areaId, projectId);
     });
     forceImmediateSaveRef.current = true;
     setDraggedTaskId(null);
@@ -1705,20 +1715,36 @@ export default function TaskTracker() {
     if (taskId === beforeTaskId) return;
     setTasks((prev) => {
       const fromIdx = prev.findIndex((t) => t.id === taskId);
-      const targetTask = prev.find((t) => t.id === beforeTaskId);
-      if (fromIdx === -1 || !targetTask) return prev;
+      if (fromIdx === -1) return prev;
       const list = [...prev];
       const [moved] = list.splice(fromIdx, 1);
-      const toIdx = list.findIndex((t) => t.id === beforeTaskId);
-      const insertIdx = toIdx === -1 ? list.length : toIdx;
-      const movedUpdated = {
-        ...moved,
-        areaId: targetTask.areaId,
-        projectId: targetTask.projectId,
-        order: orderBetween(list, insertIdx),
-      };
+
+      let areaId = moved.areaId;
+      let projectId = moved.projectId;
+      let insertIdx = list.length;
+
+      if (beforeTaskId != null) {
+        const targetIdx = list.findIndex((t) => t.id === beforeTaskId);
+        if (targetIdx !== -1) {
+          areaId = list[targetIdx].areaId;
+          projectId = list[targetIdx].projectId;
+          insertIdx = targetIdx;
+        } else {
+          insertIdx = -1; // unknown target — bail below
+        }
+      } else {
+        // No target given — move to the end of the task's own current group.
+        let lastIdx = -1;
+        for (let i = 0; i < list.length; i++) {
+          if (list[i].areaId === areaId && list[i].projectId === projectId) lastIdx = i;
+        }
+        insertIdx = lastIdx + 1;
+      }
+
+      if (insertIdx === -1) return prev;
+      const movedUpdated = { ...moved, areaId, projectId };
       list.splice(insertIdx, 0, movedUpdated);
-      return list;
+      return reassignGroupOrder(list, areaId, projectId);
     });
     forceImmediateSaveRef.current = true;
     setDraggedTaskId(null);
@@ -2070,7 +2096,6 @@ export default function TaskTracker() {
         mobileLongPressRef.current.x = touch.clientX;
         mobileLongPressRef.current.y = touch.clientY;
         mobileLongPressRef.current.taskId = t.id;
-        mobileLongPressRef.current.lastOverId = t.id;
         clearTimeout(mobileLongPressRef.current.timer);
         mobileLongPressRef.current.timer = setTimeout(() => {
           mobileSwipeRef.current.tracking = false; // long-press claims the gesture; cancel swipe/back
@@ -2088,9 +2113,25 @@ export default function TaskTracker() {
           const el = document.elementFromPoint(touch.clientX, touch.clientY);
           const rowEl = el && el.closest && el.closest("[data-task-id]");
           const overId = rowEl && rowEl.getAttribute("data-task-id");
-          if (overId && overId !== mobileLongPressRef.current.lastOverId) {
-            reorderTask(t.id, overId);
-            mobileLongPressRef.current.lastOverId = overId;
+          if (overId && overId !== t.id) {
+            const rect = rowEl.getBoundingClientRect();
+            const isLowerHalf = touch.clientY > rect.top + rect.height / 2;
+            const overKey = `${overId}:${isLowerHalf}`;
+            if (overKey !== mobileLongPressRef.current.lastOverKey) {
+              let beforeId = overId;
+              if (isLowerHalf) {
+                // insert AFTER overId — find whichever visible task row comes
+                // right after it in DOM order and insert before THAT one
+                // instead (or at the very end if overId is the last row).
+                const allRows = Array.from(document.querySelectorAll("[data-task-id]"));
+                const overIdx = allRows.findIndex((r) => r.getAttribute("data-task-id") === overId);
+                const nextRow = allRows[overIdx + 1];
+                const nextId = nextRow && nextRow.getAttribute("data-task-id");
+                beforeId = nextId && nextId !== t.id ? nextId : null;
+              }
+              reorderTask(t.id, beforeId);
+              mobileLongPressRef.current.lastOverKey = overKey;
+            }
           }
           return;
         }
@@ -3168,7 +3209,7 @@ export default function TaskTracker() {
         .td-detalle { text-align: center; }
         .td-title { }
         .td-title-row { display: flex; align-items: center; gap: 10px; }
-        .td-indent .td-title-row { padding-left: 48px; }
+        .td-indent .td-title-row { padding-left: 24px; }
         .col-center { text-align: center; }
         .note-input { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; color: var(--text-dim); font-size: 13px; padding: 5px 8px 5px 3px; width: 85%; outline: none; }
         .title-input { background: var(--surface-2); border: 1px solid var(--amber); border-radius: 6px; color: var(--text); font-size: 14px; padding: 5px 8px 5px 3px; width: 100%; flex: 1; min-width: 0; outline: none; }
