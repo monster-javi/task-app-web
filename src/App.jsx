@@ -5,7 +5,7 @@ import {
   Search, Bell, ChevronDown, ChevronRight, ChevronLeft,
   Trash2, Loader2, Plus, Circle, CircleDot, CheckCircle2, Pencil, ListChecks,
   List as ListIcon, Flag, Calendar as CalendarIcon, ChevronsDown, ChevronsUp, X,
-  RefreshCw, Cloud, CloudOff, Download, Upload, Settings, Lock, Unlock, Info,
+  RefreshCw, Cloud, CloudOff, Download, Upload, Settings, Lock, Unlock, Info, GripVertical,
 } from "lucide-react";
 
 // ---------- Supabase ----------
@@ -555,7 +555,7 @@ function QuickAddRow({ placeholder, onAdd, indent, general }) {
   const [val, setVal] = useState("");
   function submit() {
     const clean = val.trim();
-    if (!clean) { setActive(false); return; }
+    if (!clean) { setActive(false); setVal(""); return; }
     onAdd(clean);
     setVal("");
   }
@@ -563,7 +563,7 @@ function QuickAddRow({ placeholder, onAdd, indent, general }) {
     return (
       <div
         className={`quick-add-row quick-add-row--ghost ${indent ? "quick-add-row--indent" : ""}`}
-        onClick={() => setActive(true)}
+        onClick={() => { setVal(""); setActive(true); }}
         title={general ? "Agregar tarea general (sin proyecto)" : "Agregar tarea"}
       />
     );
@@ -579,9 +579,9 @@ function QuickAddRow({ placeholder, onAdd, indent, general }) {
         onChange={(e) => setVal(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") { e.preventDefault(); submit(); }
-          if (e.key === "Escape") setActive(false);
+          if (e.key === "Escape") { setActive(false); setVal(""); }
         }}
-        onBlur={() => setActive(false)}
+        onBlur={() => { setActive(false); setVal(""); }}
       />
     </div>
   );
@@ -2098,63 +2098,11 @@ export default function TaskTracker() {
   function taskRowSwipeHandlers(t) {
     return {
       onTouchStart: (e) => {
-        e.stopPropagation();
         const touch = e.touches[0];
         mobileSwipeRef.current = { x: touch.clientX, y: touch.clientY, tracking: true, taskId: t.id };
-        mobileLongPressRef.current.x = touch.clientX;
-        mobileLongPressRef.current.y = touch.clientY;
-        mobileLongPressRef.current.taskId = t.id;
-        clearTimeout(mobileLongPressRef.current.timer);
-        mobileLongPressRef.current.timer = setTimeout(() => {
-          mobileSwipeRef.current.tracking = false; // long-press claims the gesture; cancel swipe/back
-          setMobileDraggingTaskId(t.id);
-          setMobileDragOffsetY(0);
-          if (navigator.vibrate) navigator.vibrate(10);
-        }, 450);
       },
-      onTouchMove: (e) => {
-        e.stopPropagation();
-        const touch = e.touches[0];
-        if (mobileDraggingTaskId === t.id) {
-          e.preventDefault();
-          setMobileDragOffsetY(touch.clientY - mobileLongPressRef.current.y);
-          const el = document.elementFromPoint(touch.clientX, touch.clientY);
-          const rowEl = el && el.closest && el.closest("[data-task-id]");
-          const overId = rowEl && rowEl.getAttribute("data-task-id");
-          if (overId && overId !== t.id) {
-            const rect = rowEl.getBoundingClientRect();
-            const isLowerHalf = touch.clientY > rect.top + rect.height / 2;
-            const overKey = `${overId}:${isLowerHalf}`;
-            if (overKey !== mobileLongPressRef.current.lastOverKey) {
-              let beforeId = overId;
-              if (isLowerHalf) {
-                // insert AFTER overId — find whichever visible task row comes
-                // right after it in DOM order and insert before THAT one
-                // instead (or at the very end if overId is the last row).
-                const allRows = Array.from(document.querySelectorAll("[data-task-id]"));
-                const overIdx = allRows.findIndex((r) => r.getAttribute("data-task-id") === overId);
-                const nextRow = allRows[overIdx + 1];
-                const nextId = nextRow && nextRow.getAttribute("data-task-id");
-                beforeId = nextId && nextId !== t.id ? nextId : null;
-              }
-              reorderTask(t.id, beforeId);
-              mobileLongPressRef.current.lastOverKey = overKey;
-            }
-          }
-          return;
-        }
-        const dx = Math.abs(touch.clientX - mobileLongPressRef.current.x);
-        const dy = Math.abs(touch.clientY - mobileLongPressRef.current.y);
-        if (dx > 10 || dy > 10) clearTimeout(mobileLongPressRef.current.timer);
-      },
+      onTouchMove: () => {},
       onTouchEnd: (e) => {
-        e.stopPropagation();
-        clearTimeout(mobileLongPressRef.current.timer);
-        if (mobileDraggingTaskId === t.id) {
-          setMobileDraggingTaskId(null);
-          setMobileDragOffsetY(0);
-          return;
-        }
         if (!mobileSwipeRef.current.tracking) return;
         const touch = e.changedTouches[0];
         const dx = touch.clientX - mobileSwipeRef.current.x;
@@ -2166,6 +2114,54 @@ export default function TaskTracker() {
           if (mobileRevealedTaskId === t.id) setMobileRevealedTaskId(null);
           else if (mobileSwipeRef.current.x < 36) mobileGoBack();
         }
+      },
+    };
+  }
+
+  function dragHandleHandlers(t) {
+    return {
+      onTouchStart: (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        const touch = e.touches[0];
+        mobileLongPressRef.current.x = touch.clientX;
+        mobileLongPressRef.current.y = touch.clientY;
+        mobileLongPressRef.current.taskId = t.id;
+        mobileLongPressRef.current.lastOverKey = null;
+        setMobileDraggingTaskId(t.id);
+        setMobileDragOffsetY(0);
+        if (navigator.vibrate) navigator.vibrate(10);
+      },
+      onTouchMove: (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        const touch = e.touches[0];
+        setMobileDragOffsetY(touch.clientY - mobileLongPressRef.current.y);
+        const el = document.elementFromPoint(touch.clientX, touch.clientY);
+        const rowEl = el && el.closest && el.closest("[data-task-id]");
+        const overId = rowEl && rowEl.getAttribute("data-task-id");
+        if (overId && overId !== t.id) {
+          const rect = rowEl.getBoundingClientRect();
+          const isLowerHalf = touch.clientY > rect.top + rect.height / 2;
+          const overKey = `${overId}:${isLowerHalf}`;
+          if (overKey !== mobileLongPressRef.current.lastOverKey) {
+            let beforeId = overId;
+            if (isLowerHalf) {
+              const allRows = Array.from(document.querySelectorAll("[data-task-id]"));
+              const overIdx = allRows.findIndex((r) => r.getAttribute("data-task-id") === overId);
+              const nextRow = allRows[overIdx + 1];
+              const nextId = nextRow && nextRow.getAttribute("data-task-id");
+              beforeId = nextId && nextId !== t.id ? nextId : null;
+            }
+            reorderTask(t.id, beforeId);
+            mobileLongPressRef.current.lastOverKey = overKey;
+          }
+        }
+      },
+      onTouchEnd: (e) => {
+        e.stopPropagation();
+        setMobileDraggingTaskId(null);
+        setMobileDragOffsetY(0);
       },
     };
   }
@@ -2247,7 +2243,12 @@ export default function TaskTracker() {
             <Trash2 size={16} /> Eliminar
           </button>
         ) : (
-          renderMobileTaskIcons(t)
+          <>
+            {renderMobileTaskIcons(t)}
+            <button className="m-drag-handle" {...dragHandleHandlers(t)}>
+              <GripVertical size={18} />
+            </button>
+          </>
         )}
       </div>
     );
@@ -3541,6 +3542,7 @@ export default function TaskTracker() {
           .m-task-note { font-size: 13px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
           .m-task-note--empty { color: var(--text-faint); opacity: 0.6; }
           .m-task-icons { display: flex; flex-direction: row; gap: 10px; align-items: center; flex-shrink: 0; background: none; border: none; padding: 10px 4px; }
+          .m-drag-handle { flex-shrink: 0; background: none; border: none; padding: 10px 4px 10px 8px; color: var(--text-faint); touch-action: none; }
           .m-flag { color: var(--text-faint); }
           .m-flag--Baja { color: var(--text-faint); }
           .m-flag--Media { color: var(--amber); }
