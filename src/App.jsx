@@ -1529,23 +1529,10 @@ export default function TaskTracker() {
     setEditingTitleId(null);
   }
 
-  function closeTitleEditing(id, value) {
-    const clean = value.trim();
-    if (clean) {
-      setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, title: clean } : t)));
-    } else if (freshTaskIdRef.current === id) {
-      // A task created mid-chain (via Enter) that never got any text typed
-      // into it — don't leave a blank, invisible task sitting in the list.
-      removeTask(id);
-      freshTaskIdRef.current = null;
-    }
-    setEditingTitleId(null);
-  }
-
   function discardTitleEditing(id) {
-    // Desktop: leaving without pressing Enter always discards — a fresh
-    // (chained) task that was never confirmed gets removed; an existing
-    // task being renamed just keeps its original title untouched.
+    // Leaving without pressing Enter always discards — a fresh (chained)
+    // task that was never confirmed gets removed; an existing task being
+    // renamed just keeps its original title untouched.
     if (freshTaskIdRef.current === id) {
       removeTask(id);
       freshTaskIdRef.current = null;
@@ -1578,10 +1565,20 @@ export default function TaskTracker() {
     setNewAreaName("");
   }
 
+  function discardNewArea() {
+    setNewAreaName("");
+    setAddingArea(false);
+  }
+
   function createAreaFromPanel() {
     const name = panelNewAreaName.trim();
     if (name) ensureArea(name);
     setPanelNewAreaName("");
+  }
+
+  function discardNewAreaFromPanel() {
+    setPanelNewAreaName("");
+    setPanelAddingArea(false);
   }
 
   function handleDropOnTarget(areaId, projectId) {
@@ -1616,6 +1613,10 @@ export default function TaskTracker() {
   function commitRename() {
     const name = renameValue.trim();
     if (name) setAreas((prev) => prev.map((a) => (a.id === renamingAreaId ? { ...a, name } : a)));
+    setRenamingAreaId(null);
+  }
+
+  function discardRename() {
     setRenamingAreaId(null);
   }
 
@@ -1699,6 +1700,10 @@ export default function TaskTracker() {
           : a
       )));
     }
+    setRenamingProjectId(null);
+  }
+
+  function discardRenameProject() {
     setRenamingProjectId(null);
   }
 
@@ -1843,6 +1848,7 @@ export default function TaskTracker() {
   function openMobileQuickAdd() {
     setMobileQuickAddAreaId(mobileAreaId || (areas[0] && areas[0].id) || null);
     setMobileQuickAddProjectId(null);
+    setMobileQuickAddText("");
     setMobileScreen("quickadd");
   }
 
@@ -1975,9 +1981,9 @@ export default function TaskTracker() {
               autoFocus
               className="m-task-title-input"
               defaultValue={t.title}
-              onBlur={(e) => {
+              onBlur={() => {
                 if (titleKeyHandledRef.current === t.id) { titleKeyHandledRef.current = null; return; }
-                closeTitleEditing(t.id, e.target.value);
+                discardTitleEditing(t.id);
               }}
               onKeyDown={(e) => {
                 if (e.key === "Enter") { e.preventDefault(); titleKeyHandledRef.current = t.id; commitTitleAndAddNext(t, e.target.value); }
@@ -2040,6 +2046,7 @@ export default function TaskTracker() {
 
     return (
       <div className="m-screen">
+        <div className="m-brand-row"><span className="brand-dot" />Task Tracker</div>
         <div className="m-topbar">
           <div className="m-filters">
             <button className={`m-filter ${mobileExpandedFilter === "pendientes" ? "m-filter--active" : ""}`} onClick={() => toggleMobileFilter("pendientes")}>
@@ -2123,7 +2130,7 @@ export default function TaskTracker() {
                       value={renameValue}
                       onChange={(e) => setRenameValue(e.target.value)}
                       onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRenamingAreaId(null); }}
-                      onBlur={commitRename}
+                      onBlur={discardRename}
                     />
                   </div>
                 ) : mobileRevealedAreaId === a.id ? (
@@ -2157,7 +2164,6 @@ export default function TaskTracker() {
                     }}
                     onBlur={() => {
                       if (areaKeyHandledRef.current) { areaKeyHandledRef.current = false; return; }
-                      const n = mobileNewAreaName.trim(); if (n) ensureArea(n);
                       setMobileNewAreaName(""); setMobileAddingArea(false);
                     }}
                   />
@@ -2214,7 +2220,8 @@ export default function TaskTracker() {
           }}
           onBlur={() => {
             if (inlineAddEscapedRef.current) { inlineAddEscapedRef.current = false; return; }
-            submitAndContinue();
+            setMobileInlineAddKey(null);
+            setMobileInlineAddText("");
           }}
         />
       </div>
@@ -2273,7 +2280,7 @@ export default function TaskTracker() {
                       value={renameProjectValue}
                       onChange={(e) => setRenameProjectValue(e.target.value)}
                       onKeyDown={(e) => { if (e.key === "Enter") commitRenameProject(); if (e.key === "Escape") setRenamingProjectId(null); }}
-                      onBlur={commitRenameProject}
+                      onBlur={discardRenameProject}
                       autoFocus
                     />
                   </div>
@@ -2319,7 +2326,6 @@ export default function TaskTracker() {
                   }}
                   onBlur={() => {
                     if (projectKeyHandledRef.current) { projectKeyHandledRef.current = false; return; }
-                    createProjectWithName(area.id, mobileNewProjectName);
                     setMobileNewProjectName(""); setMobileAddingProjectAreaId(null);
                   }}
                 />
@@ -2469,7 +2475,6 @@ export default function TaskTracker() {
             value={mobileQuickAddText}
             onChange={(e) => setMobileQuickAddText(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
-            onBlur={submit}
           />
           <button className="m-quickadd-send" onClick={submit}><Plus size={18} /></button>
         </div>
@@ -2937,10 +2942,10 @@ export default function TaskTracker() {
         .note-btn { color: var(--text-faint); font-size: 13px; cursor: pointer; background: none; border: none; padding: 0; }
         .note-btn:hover { color: var(--text-dim); }
         .td-check { text-align: center; }
-        .td-check--indent { padding-left: 16px; }
+        .td-check--indent { padding-left: 18px; }
         .row-check { background: none; border: none; padding: 2px; display: inline-flex; cursor: pointer; }
         .td-detalle { text-align: center; }
-        .td-indent { padding-left: 40px; }
+        .td-indent { padding-left: 18px; }
         .col-center { text-align: center; }
         .note-input { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; color: var(--text-dim); font-size: 13px; padding: 5px 8px 5px 3px; width: 85%; outline: none; }
         .title-input { background: var(--surface-2); border: 1px solid var(--amber); border-radius: 6px; color: var(--text); font-size: 14px; padding: 5px 8px 5px 3px; width: 100%; outline: none; }
@@ -3126,6 +3131,10 @@ export default function TaskTracker() {
           .m-list { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 10px 12px 16px; display: flex; flex-direction: column; }
           .m-empty-hint { padding: 30px 10px; text-align: center; color: var(--text-faint); font-size: 13px; }
 
+          .m-brand-row {
+            display: flex; align-items: center; gap: 8px; padding: 12px 14px 10px; font-weight: 600;
+            font-size: 15px; letter-spacing: -0.01em; color: var(--text); border-bottom: 1px solid var(--border); flex-shrink: 0;
+          }
           .m-topbar { padding: 12px 14px 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
           .m-filters { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
           .m-filter {
@@ -3335,7 +3344,7 @@ export default function TaskTracker() {
                   value={renameValue}
                   onClick={(e) => e.stopPropagation()}
                   onChange={(e) => setRenameValue(e.target.value)}
-                  onBlur={commitRename}
+                  onBlur={discardRename}
                   onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRenamingAreaId(null); }}
                 />
               ) : (
@@ -3399,7 +3408,7 @@ export default function TaskTracker() {
                         value={renameProjectValue}
                         onClick={(e) => e.stopPropagation()}
                         onChange={(e) => setRenameProjectValue(e.target.value)}
-                        onBlur={commitRenameProject}
+                        onBlur={discardRenameProject}
                         onKeyDown={(e) => { if (e.key === "Enter") commitRenameProject(); if (e.key === "Escape") setRenamingProjectId(null); }}
                       />
                     ) : (
@@ -3444,7 +3453,7 @@ export default function TaskTracker() {
             placeholder="Nombre del área..."
             value={newAreaName}
             onChange={(e) => setNewAreaName(e.target.value)}
-            onBlur={createArea}
+            onBlur={discardNewArea}
             onKeyDown={(e) => { if (e.key === "Enter") createArea(); if (e.key === "Escape") { setNewAreaName(""); setAddingArea(false); } }}
           />
         ) : (
@@ -3731,7 +3740,7 @@ export default function TaskTracker() {
                     placeholder="Nombre del área..."
                     value={panelNewAreaName}
                     onChange={(e) => setPanelNewAreaName(e.target.value)}
-                    onBlur={createAreaFromPanel}
+                    onBlur={discardNewAreaFromPanel}
                     onKeyDown={(e) => {
                       if (e.key === "Enter") createAreaFromPanel();
                       if (e.key === "Escape") { setPanelNewAreaName(""); setPanelAddingArea(false); }
