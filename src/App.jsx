@@ -1623,17 +1623,19 @@ export default function TaskTracker() {
 
   function desktopBlurTitleEditing(id, value) {
     if (titleKeyHandledRef.current === id) { titleKeyHandledRef.current = null; return; }
-    // Desktop has no keyboard "visto" ambiguity — a click elsewhere is
-    // always a deliberate action, so: save it if there's text (this is a
-    // real edit to an existing task), or discard if it's a still-blank
-    // task that was never confirmed (no orphaned empty task left behind).
+    // A task that was never confirmed (fresh — created mid-chain via Enter,
+    // or the very first one) always gets discarded on blur, no matter how
+    // much partial text is sitting in the box. Only a click away from an
+    // ALREADY-existing task is a real edit, and that one saves.
+    if (freshTaskIdRef.current === id) {
+      removeTask(id);
+      freshTaskIdRef.current = null;
+      setEditingTitleId(null);
+      return;
+    }
     const clean = value.trim();
     if (clean) {
       setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, title: clean } : t)));
-      if (freshTaskIdRef.current === id) freshTaskIdRef.current = null;
-    } else if (freshTaskIdRef.current === id) {
-      removeTask(id);
-      freshTaskIdRef.current = null;
     }
     setEditingTitleId(null);
   }
@@ -3521,7 +3523,7 @@ export default function TaskTracker() {
             border-bottom: 1px solid var(--border); position: relative; background: var(--bg);
             -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
           }
-          .m-task-row--dragging { z-index: 10; box-shadow: 0 6px 16px rgba(0,0,0,0.4); border-radius: 8px; background: var(--surface); }
+          .m-task-row--dragging { z-index: 10; box-shadow: 0 6px 16px rgba(0,0,0,0.4); border-radius: 8px; background: var(--surface); pointer-events: none; }
           .m-task-row--revealed { background: rgba(240,85,75,0.06); }
           .m-area-card--revealed { background: rgba(240,85,75,0.06); }
           .m-row-delete {
