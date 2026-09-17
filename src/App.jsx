@@ -2406,7 +2406,16 @@ export default function TaskTracker() {
                     }}
                     onBlur={() => {
                       if (areaKeyHandledRef.current) { areaKeyHandledRef.current = false; return; }
-                      setMobileNewAreaName(""); setMobileAddingArea(false);
+                      const nameAtBlur = mobileNewAreaName;
+                      mobileScreenTapRef.current = false;
+                      setTimeout(() => {
+                        const wasScreenTap = mobileScreenTapRef.current;
+                        mobileScreenTapRef.current = false;
+                        const n = nameAtBlur.trim();
+                        if (!wasScreenTap && n) ensureArea(n);
+                        setMobileNewAreaName("");
+                        setMobileAddingArea(false);
+                      }, 0);
                     }}
                   />
                 </div>
@@ -3428,7 +3437,7 @@ export default function TaskTracker() {
 
           /* ---- mobile drill-down screens (areas / área / nota) ---- */
           .m-screen { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-          .m-list { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 10px 12px 16px; display: flex; flex-direction: column; }
+          .m-list { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 10px 12px 16px; display: flex; flex-direction: column; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
           .m-list--dragging { overflow-y: hidden; touch-action: none; }
           .m-empty-hint { padding: 30px 10px; text-align: center; color: var(--text-faint); font-size: 13px; }
 
@@ -3509,7 +3518,7 @@ export default function TaskTracker() {
           .m-project-name { flex: 1; font-size: 16.5px; font-weight: 700; letter-spacing: 0.03em; }
           .m-project-count { font-size: 11px; color: var(--text-faint); background: var(--surface-2); padding: 2px 7px; border-radius: 999px; }
 
-          .m-inline-add-zone { min-height: 34px; cursor: text; }
+          .m-inline-add-zone { min-height: 34px; cursor: text; -webkit-user-select: none; user-select: none; }
           .m-inline-add-zone--active { min-height: 0; padding: 6px 4px; }
           .m-inline-add-zone--active input {
             width: 100%; background: var(--surface-2); border: 1px solid rgba(232,163,61,0.4); border-radius: 8px;
