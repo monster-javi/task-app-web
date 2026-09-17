@@ -673,6 +673,7 @@ export default function TaskTracker() {
   const [editingTitleId, setEditingTitleId] = useState(null);
   const freshTaskIdRef = useRef(null);
   const titleKeyHandledRef = useRef(null);
+  const focusEndRef = useRef(false);
   const areaKeyHandledRef = useRef(false);
   const projectKeyHandledRef = useRef(false);
   const inlineAddEscapedRef = useRef(false);
@@ -1146,11 +1147,15 @@ export default function TaskTracker() {
     setEncPass(""); setEncPass2(""); setEncError("");
   }
 
+  const forceImmediateSaveRef = useRef(false);
+
   // ---- autosave (debounced); diffs against the last-saved snapshot and
   // sends only the rows that actually changed, instead of one big blob ----
   useEffect(() => {
     if (!session || !hasLoadedRef.current || bootStatus !== "ready") return;
-    const id = setTimeout(() => { saveDiff(); }, 150);
+    const delay = forceImmediateSaveRef.current ? 0 : 150;
+    forceImmediateSaveRef.current = false;
+    const id = setTimeout(() => { saveDiff(); }, delay);
     return () => clearTimeout(id);
   }, [areas, tasks, bootStatus, session]);
 
@@ -1597,6 +1602,23 @@ export default function TaskTracker() {
     setEditingTitleId(null);
   }
 
+  function desktopBlurTitleEditing(id, value) {
+    if (titleKeyHandledRef.current === id) { titleKeyHandledRef.current = null; return; }
+    // Desktop has no keyboard "visto" ambiguity — a click elsewhere is
+    // always a deliberate action, so: save it if there's text (this is a
+    // real edit to an existing task), or discard if it's a still-blank
+    // task that was never confirmed (no orphaned empty task left behind).
+    const clean = value.trim();
+    if (clean) {
+      setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, title: clean } : t)));
+      if (freshTaskIdRef.current === id) freshTaskIdRef.current = null;
+    } else if (freshTaskIdRef.current === id) {
+      removeTask(id);
+      freshTaskIdRef.current = null;
+    }
+    setEditingTitleId(null);
+  }
+
   function removeTask(id) {
     setTasks((prev) => prev.filter((t) => t.id !== id));
   }
@@ -1661,6 +1683,7 @@ export default function TaskTracker() {
       ), 0);
       return prev.map((t) => (t.id === draggedTaskId ? { ...t, areaId, projectId, order: groupMax + 1000 } : t));
     });
+    forceImmediateSaveRef.current = true;
     setDraggedTaskId(null);
     setDragOverKey(null);
   }
@@ -1684,6 +1707,7 @@ export default function TaskTracker() {
       list.splice(insertIdx, 0, movedUpdated);
       return list;
     });
+    forceImmediateSaveRef.current = true;
     setDraggedTaskId(null);
     setDragOverKey(null);
   }
@@ -1747,6 +1771,21 @@ export default function TaskTracker() {
     const newTask = { id: uid(), areaId, projectId: projectId || null, title: title.trim(), note: "", status: "Por hacer", priority: "Media", date: null };
     setTasks((prev) => insertAtEndOfGroup(prev, newTask));
     showToast("Tarea creada");
+  }
+
+  function backspaceMergeWithPrevious(t, keyGuardRef) {
+    const idx = tasks.findIndex((x) => x.id === t.id);
+    let prevTask = null;
+    for (let i = idx - 1; i >= 0; i--) {
+      if (tasks[i].areaId === t.areaId && tasks[i].projectId === t.projectId) { prevTask = tasks[i]; break; }
+    }
+    if (!prevTask) return false; // first task in its group — nothing to merge into
+    if (keyGuardRef) keyGuardRef.current = t.id; // suppress this input's own blur logic
+    freshTaskIdRef.current = null;
+    removeTask(t.id);
+    focusEndRef.current = true;
+    setEditingTitleId(prevTask.id);
+    return true;
   }
 
   function commitTitleAndAddNext(task, value) {
@@ -2090,6 +2129,14 @@ export default function TaskTracker() {
               autoFocus
               className="m-task-title-input"
               defaultValue={t.title}
+              ref={(el) => {
+                if (el && focusEndRef.current) {
+                  focusEndRef.current = false;
+                  const len = el.value.length;
+                  el.focus();
+                  el.setSelectionRange(len, len);
+                }
+              }}
               onBlur={(e) => {
                 if (titleKeyHandledRef.current === t.id) { titleKeyHandledRef.current = null; return; }
                 const textAtBlur = e.target.value;
@@ -2113,6 +2160,9 @@ export default function TaskTracker() {
               onKeyDown={(e) => {
                 if (e.key === "Enter") { e.preventDefault(); titleKeyHandledRef.current = t.id; commitTitleAndAddNext(t, e.target.value); }
                 if (e.key === "Escape") { titleKeyHandledRef.current = t.id; handleTitleEscape(t.id); }
+                if (e.key === "Backspace" && e.target.value === "") {
+                  if (backspaceMergeWithPrevious(t, titleKeyHandledRef)) e.preventDefault();
+                }
               }}
             />
           ) : (
@@ -2680,10 +2730,21 @@ export default function TaskTracker() {
                       autoFocus
                       className="title-input"
                       defaultValue={t.title}
-                      onBlur={() => discardTitleEditing(t.id)}
+                      ref={(el) => {
+                        if (el && focusEndRef.current) {
+                          focusEndRef.current = false;
+                          const len = el.value.length;
+                          el.focus();
+                          el.setSelectionRange(len, len);
+                        }
+                      }}
+                      onBlur={(e) => desktopBlurTitleEditing(t.id, e.target.value)}
                       onKeyDown={(e) => {
-                        if (e.key === "Enter") { e.preventDefault(); commitTitleAndAddNext(t, e.target.value); }
-                        if (e.key === "Escape") handleTitleEscape(t.id);
+                        if (e.key === "Enter") { e.preventDefault(); titleKeyHandledRef.current = t.id; commitTitleAndAddNext(t, e.target.value); }
+                        if (e.key === "Escape") { titleKeyHandledRef.current = t.id; handleTitleEscape(t.id); }
+                        if (e.key === "Backspace" && e.target.value === "") {
+                          if (backspaceMergeWithPrevious(t, titleKeyHandledRef)) e.preventDefault();
+                        }
                       }}
                     />
                   ) : (
