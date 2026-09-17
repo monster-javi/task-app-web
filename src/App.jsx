@@ -584,7 +584,9 @@ export default function TaskTracker() {
   // ---- client-side (zero-knowledge) encryption ----
   const encryptionKeyRef = useRef(null); // CryptoKey, in-memory only, never persisted
   const encSaltRef = useRef(null); // this user's salt (not secret, just needs to stay consistent)
-  const pendingEnvelopeRef = useRef(null); // fetched {salt,iv,ciphertext} while waiting to unlock
+  const pendingRowsRef = useRef(null); // fetched task_kv rows while waiting to unlock
+  const pendingSaltRef = useRef(null);
+  const pendingLegacyEnvelopeRef = useRef(null); // old single-blob envelope, only during one-time migration
   const [encPass, setEncPass] = useState("");
   const [encPass2, setEncPass2] = useState("");
   const [encError, setEncError] = useState("");
@@ -632,7 +634,9 @@ export default function TaskTracker() {
   const [syncError, setSyncError] = useState(false);
   const saveRetryRef = useRef({ attempt: 0, timer: null });
   const hasLoadedRef = useRef(false);
-  const lastAppliedUpdatedAtRef = useRef(0);
+  const lastWriteAtRef = useRef(new Map()); // rowKey -> ms, echo-guard per row
+  const areasSnapshotRef = useRef("[]"); // last-saved areas JSON, for diffing
+  const taskSnapshotsRef = useRef(new Map()); // taskId -> last-saved JSON, for diffing
 
   const [selectedAreaId, setSelectedAreaId] = useState("all");
   const [selectedProjectId, setSelectedProjectId] = useState(null);
@@ -727,7 +731,12 @@ export default function TaskTracker() {
         hasLoadedRef.current = false;
         encryptionKeyRef.current = null;
         encSaltRef.current = null;
-        pendingEnvelopeRef.current = null;
+        pendingRowsRef.current = null;
+        pendingSaltRef.current = null;
+        pendingLegacyEnvelopeRef.current = null;
+        lastWriteAtRef.current = new Map();
+        areasSnapshotRef.current = "[]";
+        taskSnapshotsRef.current = new Map();
         setEncPass(""); setEncPass2(""); setEncError("");
         setAreas([]);
         setTasks([]);
@@ -741,109 +750,207 @@ export default function TaskTracker() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ---- per-row storage helpers (mirrors Gastos App: one row per piece of
+  // data, not one big blob) ----
+  function looksEncryptedValue(raw) {
+    if (typeof raw !== "string" || !raw.startsWith("{")) return false;
+    try {
+      const p = JSON.parse(raw);
+      return !!(p && p.__enc && p.iv && p.ciphertext);
+    } catch {
+      return false;
+    }
+  }
+
+  async function encryptRowValue(key, obj) {
+    return JSON.stringify({ __enc: true, ...(await encryptPayload(key, obj)) });
+  }
+
+  async function getRowValue(row, key) {
+    if (looksEncryptedValue(row.value)) {
+      if (!key) return undefined; // locked — skip, next unlock will resync
+      try {
+        return await decryptPayload(key, JSON.parse(row.value));
+      } catch {
+        return undefined;
+      }
+    }
+    try {
+      return JSON.parse(row.value);
+    } catch {
+      return undefined;
+    }
+  }
+
+  function taskRowKey(id) {
+    return `task:${id}`;
+  }
+
   // ---- load current data for this user, then stay live via realtime ----
   useEffect(() => {
     if (!session) return;
     let cancelled = false;
     const userId = session.user.id;
 
+    async function migrateLegacyBlobIfNeeded() {
+      // One-time: older sessions stored everything as a single row in
+      // app_data. If this user has never been split into task_kv rows yet,
+      // pull that legacy row in and fan it out into per-row storage.
+      const { data: legacyRow } = await supabase.from("app_data").select("data,updated_at").maybeSingle();
+      if (!legacyRow || !legacyRow.data) return { migratedAreas: null, migratedTasks: null, needsUnlock: false, legacyEnvelope: null };
+      if (legacyRow.data.encrypted) {
+        return { migratedAreas: null, migratedTasks: null, needsUnlock: true, legacyEnvelope: legacyRow.data };
+      }
+      return {
+        migratedAreas: legacyRow.data.areas || [],
+        migratedTasks: legacyRow.data.tasks || [],
+        needsUnlock: false,
+        legacyEnvelope: null,
+      };
+    }
+
+    async function writeRowsForMigration(areasVal, tasksVal, key, salt) {
+      const rows = [];
+      const areasValue = key ? await encryptRowValue(key, areasVal) : JSON.stringify(areasVal);
+      rows.push({ user_id: userId, key: "areas", value: areasValue, updated_at: new Date().toISOString() });
+      for (const t of tasksVal) {
+        const value = key ? await encryptRowValue(key, t) : JSON.stringify(t);
+        rows.push({ user_id: userId, key: taskRowKey(t.id), value, updated_at: new Date().toISOString() });
+      }
+      if (key && salt) {
+        rows.push({ user_id: userId, key: "__enc_meta__", value: JSON.stringify({ encrypted: true, salt }), updated_at: new Date().toISOString() });
+      }
+      if (rows.length) await supabase.from("task_kv").upsert(rows, { onConflict: "user_id,key" });
+    }
+
+    function applyRows(rows, key) {
+      return (async () => {
+        let newAreas = [];
+        const tasksArr = [];
+        for (const row of rows) {
+          if (row.key === "__enc_meta__") continue;
+          const value = await getRowValue(row, key);
+          if (value === undefined) continue;
+          if (row.key === "areas") newAreas = value || [];
+          else if (row.key.startsWith("task:")) tasksArr.push(value);
+        }
+        setAreas(newAreas);
+        setTasks(tasksArr);
+        areasSnapshotRef.current = JSON.stringify(newAreas);
+        taskSnapshotsRef.current = new Map(tasksArr.map((t) => [t.id, JSON.stringify(t)]));
+      })();
+    }
+
     async function load() {
-      const { data: row, error } = await supabase
-        .from("app_data")
-        .select("data,updated_at")
-        .maybeSingle();
+      const { data: rows, error } = await supabase.from("task_kv").select("key,value,updated_at");
       if (cancelled) return;
       if (error) {
         console.error(error);
         showToast("No se pudo conectar con Supabase");
         return;
       }
-      if (!row) {
-        // Brand new user: start unencrypted, ready right away. Encryption is
-        // opt-in from the lock icon, never forced up front.
-        lastAppliedUpdatedAtRef.current = 0;
-        setLastSyncAt(null);
-        setAreas([]);
-        setTasks([]);
+
+      const hasAnyRow = rows && rows.length > 0;
+      if (!hasAnyRow) {
+        const legacy = await migrateLegacyBlobIfNeeded();
+        if (cancelled) return;
+        if (legacy.needsUnlock) {
+          pendingLegacyEnvelopeRef.current = legacy.legacyEnvelope;
+          setBootStatus("enc-unlock");
+          return;
+        }
+        if (legacy.migratedAreas) {
+          await writeRowsForMigration(legacy.migratedAreas, legacy.migratedTasks, null, null);
+          setAreas(legacy.migratedAreas);
+          setTasks(legacy.migratedTasks);
+          areasSnapshotRef.current = JSON.stringify(legacy.migratedAreas);
+          taskSnapshotsRef.current = new Map(legacy.migratedTasks.map((t) => [t.id, JSON.stringify(t)]));
+        } else {
+          setAreas([]);
+          setTasks([]);
+          areasSnapshotRef.current = JSON.stringify([]);
+          taskSnapshotsRef.current = new Map();
+        }
         setIsEncrypted(false);
         hasLoadedRef.current = true;
         setBootStatus("ready");
         return;
       }
-      lastAppliedUpdatedAtRef.current = new Date(row.updated_at).getTime();
-      setLastSyncAt(new Date(row.updated_at).getTime());
-      if (row.data && row.data.encrypted) {
-        if (encryptionKeyRef.current) {
-          // Already unlocked this session — this reload was triggered by
-          // something else (e.g. a session refresh), not a real fresh start.
-          try {
-            const data = await decryptPayload(encryptionKeyRef.current, row.data);
-            setAreas(data.areas || []);
-            setTasks(data.tasks || []);
-            hasLoadedRef.current = true;
-            setBootStatus("ready");
-            return;
-          } catch {
-            // Key no longer matches what's stored; fall back to asking.
-          }
-        }
-        pendingEnvelopeRef.current = row.data;
-        setBootStatus("enc-unlock");
-      } else {
-        // Not encrypted (new user's later saves, or a legacy row from before
-        // this feature existed) — just load it straight in.
-        setAreas((row.data && row.data.areas) || []);
-        setTasks((row.data && row.data.tasks) || []);
-        setIsEncrypted(false);
-        hasLoadedRef.current = true;
-        setBootStatus("ready");
+
+      const metaRow = rows.find((r) => r.key === "__enc_meta__");
+      let meta = { encrypted: false };
+      if (metaRow) {
+        try { meta = JSON.parse(metaRow.value); } catch { meta = { encrypted: false }; }
       }
+      setIsEncrypted(!!meta.encrypted);
+      if (meta.encrypted) {
+        if (encryptionKeyRef.current) {
+          await applyRows(rows, encryptionKeyRef.current);
+          hasLoadedRef.current = true;
+          setBootStatus("ready");
+          return;
+        }
+        pendingRowsRef.current = rows;
+        pendingSaltRef.current = meta.salt;
+        setBootStatus("enc-unlock");
+        return;
+      }
+      await applyRows(rows, null);
+      hasLoadedRef.current = true;
+      setBootStatus("ready");
     }
     load();
 
-    async function applyIncomingRow(row) {
-      if (!row || !row.updated_at) return;
-      const updatedAt = new Date(row.updated_at).getTime();
-      if (updatedAt <= lastAppliedUpdatedAtRef.current) return; // our own echo or stale
-      lastAppliedUpdatedAtRef.current = updatedAt;
-      if (!row.data || !row.data.encrypted) {
-        setAreas((row.data && row.data.areas) || []);
-        setTasks((row.data && row.data.tasks) || []);
-        setLastSyncAt(updatedAt);
-        return;
-      }
-      if (!encryptionKeyRef.current) return; // still locked; will pick up latest on unlock instead
-      try {
-        const data = await decryptPayload(encryptionKeyRef.current, row.data);
-        setAreas(data.areas || []);
-        setTasks(data.tasks || []);
-        setLastSyncAt(updatedAt);
-      } catch {
-        /* wrong-session key vs. newer envelope; ignore, next unlock will resync */
-      }
-    }
-
     async function resyncNow() {
       if (cancelled || !hasLoadedRef.current) return;
-      const { data: row, error } = await supabase.from("app_data").select("data,updated_at").maybeSingle();
-      if (error || cancelled) return;
-      applyIncomingRow(row);
+      const { data: rows, error } = await supabase.from("task_kv").select("key,value,updated_at");
+      if (error || cancelled || !rows) return;
+      if (encryptionKeyRef.current == null && rows.some((r) => r.key !== "__enc_meta__" && looksEncryptedValue(r.value))) return; // locked
+      await applyRows(rows, encryptionKeyRef.current);
+      for (const row of rows) {
+        const ts = new Date(row.updated_at).getTime();
+        if (ts > (lastWriteAtRef.current.get(row.key) || 0)) lastWriteAtRef.current.set(row.key, ts);
+      }
+      setLastSyncAt(Date.now());
     }
 
     const channel = supabase
-      .channel(`app_data_changes_${userId}`)
+      .channel(`task_kv_changes_${userId}`)
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "app_data", filter: `user_id=eq.${userId}` },
-        (payload) => applyIncomingRow(payload.new)
+        { event: "*", schema: "public", table: "task_kv", filter: `user_id=eq.${userId}` },
+        async (payload) => {
+          const row = payload.new;
+          if (!row || !row.updated_at || row.key === "__enc_meta__") return; // deletes (no .new) resolve on next resync
+          const ts = new Date(row.updated_at).getTime();
+          if (ts <= (lastWriteAtRef.current.get(row.key) || 0)) return; // our own echo or stale
+          lastWriteAtRef.current.set(row.key, ts);
+          const value = await getRowValue(row, encryptionKeyRef.current);
+          if (value === undefined) return; // locked; next unlock resyncs everything
+          if (row.key === "areas") {
+            setAreas(value || []);
+            areasSnapshotRef.current = JSON.stringify(value || []);
+          } else if (row.key.startsWith("task:")) {
+            const id = row.key.slice(5);
+            setTasks((prev) => {
+              const idx = prev.findIndex((t) => t.id === id);
+              if (idx === -1) return [...prev, value];
+              const copy = [...prev];
+              copy[idx] = value;
+              return copy;
+            });
+            taskSnapshotsRef.current.set(id, JSON.stringify(value));
+          }
+          setLastSyncAt(ts);
+        }
       )
       .subscribe();
 
     // Mobile browsers routinely suspend or silently drop an idle WebSocket
-    // in the background — the realtime subscription alone can't be trusted
-    // to catch every change on its own there. Actively re-check whenever the
-    // tab/app regains focus, and on a short interval while it's open, so a
-    // missed message doesn't leave this device stale until its next edit.
+    // in the background, and the realtime handler above only reacts to
+    // inserts/updates (matching Gastos App — deletes resolve here instead).
+    // Actively re-check whenever the tab/app regains focus, and on a short
+    // interval while it's open.
     function onVisible() { if (document.visibilityState === "visible") resyncNow(); }
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("focus", onVisible);
@@ -870,19 +977,22 @@ export default function TaskTracker() {
     try {
       const salt = bytesToB64(randomBytes(16));
       const key = await deriveKeyFromPassphrase(encPass, salt);
-      const envelope = await encryptPayload(key, { areas, tasks });
       const updatedAt = new Date().toISOString();
-      lastAppliedUpdatedAtRef.current = new Date(updatedAt).getTime();
-      const { data: row, error } = await supabase
-        .from("app_data")
-        .upsert({ user_id: session.user.id, data: { encrypted: true, salt, ...envelope }, updated_at: updatedAt }, { onConflict: "user_id" })
-        .select("updated_at")
-        .single();
+      const rows = [
+        { user_id: session.user.id, key: "areas", value: await encryptRowValue(key, areas), updated_at: updatedAt },
+        ...(await Promise.all(tasks.map(async (t) => ({
+          user_id: session.user.id, key: taskRowKey(t.id), value: await encryptRowValue(key, t), updated_at: updatedAt,
+        })))),
+        { user_id: session.user.id, key: "__enc_meta__", value: JSON.stringify({ encrypted: true, salt }), updated_at: updatedAt },
+      ];
+      for (const r of rows) lastWriteAtRef.current.set(r.key, new Date(updatedAt).getTime());
+      const { error } = await supabase.from("task_kv").upsert(rows, { onConflict: "user_id,key" });
       if (error) throw error;
       encryptionKeyRef.current = key;
       encSaltRef.current = salt;
-      lastAppliedUpdatedAtRef.current = new Date(row.updated_at).getTime();
-      setLastSyncAt(new Date(row.updated_at).getTime());
+      areasSnapshotRef.current = JSON.stringify(areas);
+      taskSnapshotsRef.current = new Map(tasks.map((t) => [t.id, JSON.stringify(t)]));
+      setLastSyncAt(new Date(updatedAt).getTime());
       setEncPass(""); setEncPass2("");
       setIsEncrypted(true);
       setShowEncSettings(false);
@@ -903,13 +1013,56 @@ export default function TaskTracker() {
     if (!encPass) { setEncError("Ingresá tu contraseña de cifrado."); return; }
     setEncBusy(true);
     try {
-      const envelope = pendingEnvelopeRef.current;
-      const key = await deriveKeyFromPassphrase(encPass, envelope.salt);
-      const data = await decryptPayload(key, envelope);
+      // Legacy single-blob migration path: decrypt the old envelope once,
+      // then fan it out into per-row storage using this same passphrase.
+      if (pendingLegacyEnvelopeRef.current) {
+        const envelope = pendingLegacyEnvelopeRef.current;
+        const key = await deriveKeyFromPassphrase(encPass, envelope.salt);
+        const data = await decryptPayload(key, envelope);
+        const areasVal = data.areas || [];
+        const tasksVal = data.tasks || [];
+        const updatedAt = new Date().toISOString();
+        const rows = [
+          { user_id: session.user.id, key: "areas", value: await encryptRowValue(key, areasVal), updated_at: updatedAt },
+          ...(await Promise.all(tasksVal.map(async (t) => ({
+            user_id: session.user.id, key: taskRowKey(t.id), value: await encryptRowValue(key, t), updated_at: updatedAt,
+          })))),
+          { user_id: session.user.id, key: "__enc_meta__", value: JSON.stringify({ encrypted: true, salt: envelope.salt }), updated_at: updatedAt },
+        ];
+        for (const r of rows) lastWriteAtRef.current.set(r.key, new Date(updatedAt).getTime());
+        await supabase.from("task_kv").upsert(rows, { onConflict: "user_id,key" });
+        encryptionKeyRef.current = key;
+        encSaltRef.current = envelope.salt;
+        setAreas(areasVal);
+        setTasks(tasksVal);
+        areasSnapshotRef.current = JSON.stringify(areasVal);
+        taskSnapshotsRef.current = new Map(tasksVal.map((t) => [t.id, JSON.stringify(t)]));
+        pendingLegacyEnvelopeRef.current = null;
+        setEncPass("");
+        setIsEncrypted(true);
+        hasLoadedRef.current = true;
+        setBootStatus("ready");
+        return;
+      }
+
+      const rows = pendingRowsRef.current || [];
+      const key = await deriveKeyFromPassphrase(encPass, pendingSaltRef.current);
+      let newAreas = [];
+      const tasksArr = [];
+      let verifiedOne = false;
+      for (const row of rows) {
+        if (row.key === "__enc_meta__") continue;
+        const value = await decryptPayload(key, JSON.parse(row.value)); // throws on wrong password
+        verifiedOne = true;
+        if (row.key === "areas") newAreas = value || [];
+        else if (row.key.startsWith("task:")) tasksArr.push(value);
+      }
       encryptionKeyRef.current = key;
-      encSaltRef.current = envelope.salt;
-      setAreas(data.areas || []);
-      setTasks(data.tasks || []);
+      encSaltRef.current = pendingSaltRef.current;
+      setAreas(newAreas);
+      setTasks(tasksArr);
+      areasSnapshotRef.current = JSON.stringify(newAreas);
+      taskSnapshotsRef.current = new Map(tasksArr.map((t) => [t.id, JSON.stringify(t)]));
       setEncPass("");
       setIsEncrypted(true);
       hasLoadedRef.current = true;
@@ -927,26 +1080,27 @@ export default function TaskTracker() {
     if (!encPass) { setEncError("Ingresá tu contraseña de cifrado actual."); return; }
     setEncBusy(true);
     try {
-      // Verify the entered passphrase against what's actually stored — not just
-      // trusting the in-memory key — so disabling requires proving you have it.
-      const { data: row, error: fetchErr } = await supabase.from("app_data").select("data").maybeSingle();
-      if (fetchErr || !row) throw new Error("no-row");
-      const testKey = await deriveKeyFromPassphrase(encPass, row.data.salt);
-      await decryptPayload(testKey, row.data); // throws if the passphrase is wrong
+      const { data: rows, error: fetchErr } = await supabase.from("task_kv").select("key,value");
+      if (fetchErr || !rows) throw new Error("no-rows");
+      const someEncrypted = rows.find((r) => r.key !== "__enc_meta__" && looksEncryptedValue(r.value));
+      const testKey = await deriveKeyFromPassphrase(encPass, encSaltRef.current);
+      if (someEncrypted) await decryptPayload(testKey, JSON.parse(someEncrypted.value)); // throws if wrong
 
       const updatedAt = new Date().toISOString();
-      lastAppliedUpdatedAtRef.current = new Date(updatedAt).getTime();
-      const { data: savedRow, error } = await supabase
-        .from("app_data")
-        .upsert({ user_id: session.user.id, data: { encrypted: false, areas, tasks }, updated_at: updatedAt }, { onConflict: "user_id" })
-        .select("updated_at")
-        .single();
+      const writeRows = [
+        { user_id: session.user.id, key: "areas", value: JSON.stringify(areas), updated_at: updatedAt },
+        ...tasks.map((t) => ({ user_id: session.user.id, key: taskRowKey(t.id), value: JSON.stringify(t), updated_at: updatedAt })),
+        { user_id: session.user.id, key: "__enc_meta__", value: JSON.stringify({ encrypted: false }), updated_at: updatedAt },
+      ];
+      for (const r of writeRows) lastWriteAtRef.current.set(r.key, new Date(updatedAt).getTime());
+      const { error } = await supabase.from("task_kv").upsert(writeRows, { onConflict: "user_id,key" });
       if (error) throw error;
 
       encryptionKeyRef.current = null;
       encSaltRef.current = null;
-      lastAppliedUpdatedAtRef.current = new Date(savedRow.updated_at).getTime();
-      setLastSyncAt(new Date(savedRow.updated_at).getTime());
+      areasSnapshotRef.current = JSON.stringify(areas);
+      taskSnapshotsRef.current = new Map(tasks.map((t) => [t.id, JSON.stringify(t)]));
+      setLastSyncAt(new Date(updatedAt).getTime());
       setIsEncrypted(false);
       setEncPass("");
       setShowEncSettings(false);
@@ -966,49 +1120,76 @@ export default function TaskTracker() {
     setEncPass(""); setEncPass2(""); setEncError("");
   }
 
-  // ---- autosave (debounced); encrypts client-side first only if encryption is on ----
+  // ---- autosave (debounced); diffs against the last-saved snapshot and
+  // sends only the rows that actually changed, instead of one big blob ----
   useEffect(() => {
     if (!session || !hasLoadedRef.current || bootStatus !== "ready") return;
-    const id = setTimeout(() => { saveNow(); }, 150);
+    const id = setTimeout(() => { saveDiff(); }, 150);
     return () => clearTimeout(id);
   }, [areas, tasks, bootStatus, session]);
 
-  async function saveNow() {
+  async function saveDiff() {
     clearTimeout(saveRetryRef.current.timer);
     setSaving(true);
     try {
+      const key = encryptionKeyRef.current;
       const updatedAt = new Date().toISOString();
-      // Mark this write as "ours" *before* it goes out — the realtime echo for
-      // it can arrive over the websocket faster than this same request's own
-      // HTTP response, so updating the ref only afterwards left a race where
-      // our own change could be mistaken for an external one and re-applied.
-      lastAppliedUpdatedAtRef.current = new Date(updatedAt).getTime();
-      const dataToSave = encryptionKeyRef.current
-        ? { encrypted: true, salt: encSaltRef.current, ...(await encryptPayload(encryptionKeyRef.current, { areas, tasks })) }
-        : { encrypted: false, areas, tasks };
-      const { data: row, error } = await supabase
-        .from("app_data")
-        .upsert({ user_id: session.user.id, data: dataToSave, updated_at: updatedAt }, { onConflict: "user_id" })
-        .select("updated_at")
-        .single();
-      if (error) throw error;
-      lastAppliedUpdatedAtRef.current = new Date(row.updated_at).getTime();
-      setLastSyncAt(new Date(row.updated_at).getTime());
+      const writes = [];
+      const deleteKeys = [];
+
+      const areasJson = JSON.stringify(areas);
+      if (areasJson !== areasSnapshotRef.current) {
+        writes.push({ rowKey: "areas", value: key ? await encryptRowValue(key, areas) : areasJson });
+      }
+
+      const prevMap = taskSnapshotsRef.current;
+      const currentIds = new Set();
+      for (const t of tasks) {
+        currentIds.add(t.id);
+        const json = JSON.stringify(t);
+        if (prevMap.get(t.id) !== json) {
+          writes.push({ rowKey: taskRowKey(t.id), value: key ? await encryptRowValue(key, t) : json });
+        }
+      }
+      for (const id of prevMap.keys()) {
+        if (!currentIds.has(id)) deleteKeys.push(taskRowKey(id));
+      }
+
+      if (!writes.length && !deleteKeys.length) { setSaving(false); return; }
+
+      for (const w of writes) lastWriteAtRef.current.set(w.rowKey, new Date(updatedAt).getTime());
+
+      if (writes.length) {
+        const { error } = await supabase.from("task_kv").upsert(
+          writes.map((w) => ({ user_id: session.user.id, key: w.rowKey, value: w.value, updated_at: updatedAt })),
+          { onConflict: "user_id,key" }
+        );
+        if (error) throw error;
+      }
+      if (deleteKeys.length) {
+        const { error } = await supabase.from("task_kv").delete().eq("user_id", session.user.id).in("key", deleteKeys);
+        if (error) throw error;
+      }
+
+      areasSnapshotRef.current = areasJson;
+      for (const t of tasks) taskSnapshotsRef.current.set(t.id, JSON.stringify(t));
+      for (const dk of deleteKeys) taskSnapshotsRef.current.delete(dk.slice(5));
+
+      setLastSyncAt(new Date(updatedAt).getTime());
       setSyncError(false);
       saveRetryRef.current.attempt = 0;
     } catch (err) {
       console.error("autosave failed", err);
       setSyncError(true);
-      // A failed save must never be silently lost — keep retrying with
-      // backoff (5s, 10s, 20s... capped at 30s) until it goes through.
       const attempt = saveRetryRef.current.attempt + 1;
       saveRetryRef.current.attempt = attempt;
       const delay = Math.min(30000, 5000 * attempt);
-      saveRetryRef.current.timer = setTimeout(() => { saveNow(); }, delay);
+      saveRetryRef.current.timer = setTimeout(() => { saveDiff(); }, delay);
     } finally {
       setSaving(false);
     }
   }
+
 
   function withTimeout(promise, ms = 12000, message = "Se agotó el tiempo de espera — revisá tu conexión a internet.") {
     return Promise.race([
@@ -1876,7 +2057,7 @@ export default function TaskTracker() {
               {isEncrypted ? <Lock size={19} /> : <Unlock size={19} />}
             </button>
             {syncError && (
-              <button className="iconbtn icon-only m-top-iconbtn sync-indicator--error" onClick={saveNow} title="No se pudo guardar — tocá para reintentar">
+              <button className="iconbtn icon-only m-top-iconbtn sync-indicator--error" onClick={saveDiff} title="No se pudo guardar — tocá para reintentar">
                 <CloudOff size={19} />
               </button>
             )}
@@ -3365,7 +3546,7 @@ export default function TaskTracker() {
           </button>
           <span
             className={`iconbtn icon-only sync-indicator ${syncError ? "sync-indicator--error" : ""}`}
-            onClick={() => { if (syncError) saveNow(); }}
+            onClick={() => { if (syncError) saveDiff(); }}
             style={syncError ? { cursor: "pointer" } : undefined}
             title={syncError ? "No se pudo guardar — tocá para reintentar" : saving ? "Guardando..." : lastSyncAt ? `Sincronizado — ${new Date(lastSyncAt).toLocaleTimeString("es-AR")}` : "Conectado a Supabase"}
           >
