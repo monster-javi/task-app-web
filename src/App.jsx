@@ -1865,7 +1865,7 @@ export default function TaskTracker() {
                     />
                   </div>
                 ) : (
-                  <button key={a.id} className="m-area-card" onClick={() => openMobileArea(a.id)} {...longPressToRename(() => startRename(a))}>
+                  <button key={a.id} className="m-area-card" onClick={() => openMobileArea(a.id)}>
                     <span className="m-area-bar" style={{ background: a.color }} />
                     <span className="m-area-name">{a.name.toUpperCase()}</span>
                     <span className="m-area-count">{mobileCountFor(a.id)} pendientes</span>
@@ -1906,23 +1906,6 @@ export default function TaskTracker() {
         {renderMobileUrgentBar()}
       </div>
     );
-  }
-
-  function longPressToRename(onLongPress) {
-    const state = { timer: null, x: 0, y: 0, fired: false };
-    return {
-      onTouchStart: (e) => {
-        const touch = e.touches[0];
-        state.x = touch.clientX; state.y = touch.clientY; state.fired = false;
-        state.timer = setTimeout(() => { state.fired = true; onLongPress(); }, 500);
-      },
-      onTouchMove: (e) => {
-        const touch = e.touches[0];
-        if (Math.abs(touch.clientX - state.x) > 10 || Math.abs(touch.clientY - state.y) > 10) clearTimeout(state.timer);
-      },
-      onTouchEnd: () => clearTimeout(state.timer),
-      onClickCapture: (e) => { if (state.fired) { e.preventDefault(); e.stopPropagation(); state.fired = false; } },
-    };
   }
 
   function toggleMobileProjectCollapse(projectId) {
@@ -1993,8 +1976,7 @@ export default function TaskTracker() {
           className="m-list"
           onClick={(e) => {
             if (mobileRevealedTaskId) setMobileRevealedTaskId(null);
-            const totalTasks = generalTasks.length + projects.reduce((n, p) => n + tasksOf(p.id).length, 0);
-            if (totalTasks === 0 && e.target === e.currentTarget) {
+            if (e.target === e.currentTarget) {
               setMobileInlineAddKey(`${area.id}:general`);
               setMobileInlineAddText("");
             }
@@ -2022,7 +2004,6 @@ export default function TaskTracker() {
                   <div
                     className="m-project-header"
                     onClick={() => toggleMobileProjectCollapse(p.id)}
-                    {...longPressToRename(() => startRenameProject(area.id, p))}
                   >
                     <ChevronRight size={13} className={`m-project-chevron ${collapsed ? "" : "m-project-chevron--open"}`} />
                     <span className="m-project-dot" style={{ background: area.color }} />
