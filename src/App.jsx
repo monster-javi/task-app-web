@@ -649,6 +649,7 @@ export default function TaskTracker() {
   const [mobileInlineAddKey, setMobileInlineAddKey] = useState(null); // "areaId:projectId" or "areaId:general"
   const [mobileInlineAddText, setMobileInlineAddText] = useState("");
   const [mobileDragOffsetY, setMobileDragOffsetY] = useState(0);
+  const [mobileDropTarget, setMobileDropTarget] = useState(null); // { id, position: "before" | "after" } | null
   const mobileLongPressRef = useRef({ timer: null, x: 0, y: 0, taskId: null, lastOverKey: null });
   const statusClickGuardRef = useRef({ id: null, time: 0 });
   const [showEncSettings, setShowEncSettings] = useState(false);
@@ -2127,9 +2128,9 @@ export default function TaskTracker() {
         mobileLongPressRef.current.x = touch.clientX;
         mobileLongPressRef.current.y = touch.clientY;
         mobileLongPressRef.current.taskId = t.id;
-        mobileLongPressRef.current.lastOverKey = null;
         setMobileDraggingTaskId(t.id);
         setMobileDragOffsetY(0);
+        setMobileDropTarget(null);
         if (navigator.vibrate) navigator.vibrate(10);
       },
       onTouchMove: (e) => {
@@ -2142,26 +2143,27 @@ export default function TaskTracker() {
         const overId = rowEl && rowEl.getAttribute("data-task-id");
         if (overId && overId !== t.id) {
           const rect = rowEl.getBoundingClientRect();
-          const isLowerHalf = touch.clientY > rect.top + rect.height / 2;
-          const overKey = `${overId}:${isLowerHalf}`;
-          if (overKey !== mobileLongPressRef.current.lastOverKey) {
-            let beforeId = overId;
-            if (isLowerHalf) {
-              const allRows = Array.from(document.querySelectorAll("[data-task-id]"));
-              const overIdx = allRows.findIndex((r) => r.getAttribute("data-task-id") === overId);
-              const nextRow = allRows[overIdx + 1];
-              const nextId = nextRow && nextRow.getAttribute("data-task-id");
-              beforeId = nextId && nextId !== t.id ? nextId : null;
-            }
-            reorderTask(t.id, beforeId);
-            mobileLongPressRef.current.lastOverKey = overKey;
-          }
+          const position = touch.clientY > rect.top + rect.height / 2 ? "after" : "before";
+          setMobileDropTarget((prev) => (prev && prev.id === overId && prev.position === position ? prev : { id: overId, position }));
         }
       },
       onTouchEnd: (e) => {
         e.stopPropagation();
+        const drop = mobileDropTarget;
+        if (drop) {
+          if (drop.position === "before") {
+            reorderTask(t.id, drop.id);
+          } else {
+            const allRows = Array.from(document.querySelectorAll("[data-task-id]"));
+            const idx = allRows.findIndex((r) => r.getAttribute("data-task-id") === drop.id);
+            const nextRow = allRows[idx + 1];
+            const nextId = nextRow && nextRow.getAttribute("data-task-id");
+            reorderTask(t.id, nextId && nextId !== t.id ? nextId : null);
+          }
+        }
         setMobileDraggingTaskId(null);
         setMobileDragOffsetY(0);
+        setMobileDropTarget(null);
       },
     };
   }
@@ -2170,11 +2172,13 @@ export default function TaskTracker() {
     const done = t.status === "Hecho";
     const completing = mobileCompletingIds.has(t.id);
     const revealed = mobileRevealedTaskId === t.id;
+    const dropBefore = mobileDropTarget && mobileDropTarget.id === t.id && mobileDropTarget.position === "before";
+    const dropAfter = mobileDropTarget && mobileDropTarget.id === t.id && mobileDropTarget.position === "after";
     return (
       <div
         key={t.id}
         data-task-id={t.id}
-        className={`m-task-row ${revealed ? "m-task-row--revealed" : ""} ${mobileDraggingTaskId === t.id ? "m-task-row--dragging" : ""}`}
+        className={`m-task-row ${revealed ? "m-task-row--revealed" : ""} ${mobileDraggingTaskId === t.id ? "m-task-row--dragging" : ""} ${dropBefore ? "m-task-row--drop-before" : ""} ${dropAfter ? "m-task-row--drop-after" : ""}`}
         style={mobileDraggingTaskId === t.id ? { transform: `translateY(${mobileDragOffsetY}px)` } : undefined}
         {...taskRowSwipeHandlers(t)}
       >
@@ -3525,6 +3529,8 @@ export default function TaskTracker() {
             -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
           }
           .m-task-row--dragging { z-index: 10; box-shadow: 0 6px 16px rgba(0,0,0,0.4); border-radius: 8px; background: var(--surface); pointer-events: none; }
+          .m-task-row--drop-before { box-shadow: inset 0 2px 0 0 var(--amber); }
+          .m-task-row--drop-after { box-shadow: inset 0 -2px 0 0 var(--amber); }
           .m-task-row--revealed { background: rgba(240,85,75,0.06); }
           .m-area-card--revealed { background: rgba(240,85,75,0.06); }
           .m-row-delete {
