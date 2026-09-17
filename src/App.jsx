@@ -955,29 +955,6 @@ export default function TaskTracker() {
     clearTimeout(saveRetryRef.current.timer);
     setSaving(true);
     try {
-      // Conflict check: did another device/tab save since we last synced?
-      // With two clients editing in parallel, blindly overwriting on a timer
-      // is exactly how a change "disappears" — pull theirs in first and let
-      // this edit cycle re-save on top of it instead of clobbering it.
-      const { data: currentRow } = await supabase.from("app_data").select("data,updated_at").maybeSingle();
-      if (currentRow && new Date(currentRow.updated_at).getTime() > lastAppliedUpdatedAtRef.current) {
-        lastAppliedUpdatedAtRef.current = new Date(currentRow.updated_at).getTime();
-        let incoming = currentRow.data;
-        if (incoming && incoming.encrypted && encryptionKeyRef.current) {
-          incoming = await decryptPayload(encryptionKeyRef.current, incoming);
-        }
-        if (incoming && !currentRow.data.encrypted) {
-          setAreas(incoming.areas || []);
-          setTasks(incoming.tasks || []);
-        } else if (incoming && currentRow.data.encrypted && encryptionKeyRef.current) {
-          setAreas(incoming.areas || []);
-          setTasks(incoming.tasks || []);
-        }
-        showToast("Se sincronizó un cambio hecho desde otro dispositivo");
-        setSaving(false);
-        return; // the state update above will trigger a fresh, merged autosave
-      }
-
       const updatedAt = new Date().toISOString();
       // Mark this write as "ours" *before* it goes out — the realtime echo for
       // it can arrive over the websocket faster than this same request's own
@@ -1090,7 +1067,7 @@ export default function TaskTracker() {
   }
 
   const orderedAreas = useMemo(() => {
-    return [...areas].sort((a, b) => (isGeneralArea(a) ? 1 : 0) - (isGeneralArea(b) ? 1 : 0));
+    return [...areas].sort((a, b) => (isGeneralArea(a) ? -1 : 0) - (isGeneralArea(b) ? -1 : 0));
   }, [areas]);
 
   const pendientes = tasks.filter((t) => t.status !== "Hecho" || mobileCompletingIds.has(t.id)).length;
@@ -1376,9 +1353,8 @@ export default function TaskTracker() {
 
   function createAreaFromPanel() {
     const name = panelNewAreaName.trim();
-    if (name) selectArea(ensureArea(name));
+    if (name) ensureArea(name);
     setPanelNewAreaName("");
-    setPanelAddingArea(false);
   }
 
   function handleDropOnTarget(areaId, projectId) {
