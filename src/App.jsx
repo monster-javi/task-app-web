@@ -639,6 +639,12 @@ export default function TaskTracker() {
   const [mobileRevealedAreaId, setMobileRevealedAreaId] = useState(null);
   const [mobileQuickAddProjectId, setMobileQuickAddProjectId] = useState(null);
   const [mobileDraggingTaskId, setMobileDraggingTaskId] = useState(null);
+  useEffect(() => {
+    if (!mobileDraggingTaskId) return;
+    function blockScroll(e) { e.preventDefault(); }
+    document.addEventListener("touchmove", blockScroll, { passive: false });
+    return () => document.removeEventListener("touchmove", blockScroll);
+  }, [mobileDraggingTaskId]);
   const [mobileCollapsedProjects, setMobileCollapsedProjects] = useState(() => new Set());
   const [mobileInlineAddKey, setMobileInlineAddKey] = useState(null); // "areaId:projectId" or "areaId:general"
   const [mobileInlineAddText, setMobileInlineAddText] = useState("");
@@ -2308,7 +2314,7 @@ export default function TaskTracker() {
         </div>
 
         <div
-          className="m-list"
+          className={`m-list ${mobileDraggingTaskId ? "m-list--dragging" : ""}`}
           onClick={(e) => {
             if (mobileRevealedAreaId) setMobileRevealedAreaId(null);
             if (e.target === e.currentTarget) {
@@ -2498,7 +2504,7 @@ export default function TaskTracker() {
         </div>
 
         <div
-          className="m-list"
+          className={`m-list ${mobileDraggingTaskId ? "m-list--dragging" : ""}`}
           onClick={(e) => {
             if (mobileRevealedTaskId) setMobileRevealedTaskId(null);
             if (e.target === e.currentTarget) {
@@ -3416,6 +3422,7 @@ export default function TaskTracker() {
           /* ---- mobile drill-down screens (areas / área / nota) ---- */
           .m-screen { display: flex; flex-direction: column; height: 100%; min-height: 0; }
           .m-list { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 10px 12px 16px; display: flex; flex-direction: column; }
+          .m-list--dragging { overflow-y: hidden; touch-action: none; }
           .m-empty-hint { padding: 30px 10px; text-align: center; color: var(--text-faint); font-size: 13px; }
 
           .m-brand-row {
