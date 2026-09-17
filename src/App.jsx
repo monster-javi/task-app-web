@@ -1159,7 +1159,13 @@ export default function TaskTracker() {
     return () => clearTimeout(id);
   }, [areas, tasks, bootStatus, session]);
 
+  const savingLockRef = useRef(false);
+  const savePendingRef = useRef(false);
+
   async function saveDiff() {
+    if (savingLockRef.current) { savePendingRef.current = true; return; }
+    savingLockRef.current = true;
+    try {
     clearTimeout(saveRetryRef.current.timer);
     setSaving(true);
     try {
@@ -1218,6 +1224,13 @@ export default function TaskTracker() {
       saveRetryRef.current.timer = setTimeout(() => { saveDiff(); }, delay);
     } finally {
       setSaving(false);
+    }
+    } finally {
+      savingLockRef.current = false;
+      if (savePendingRef.current) {
+        savePendingRef.current = false;
+        saveDiff(); // something changed while we were saving — catch up right away
+      }
     }
   }
 
@@ -1943,8 +1956,7 @@ export default function TaskTracker() {
   function colGroupFor(showArea) {
     return (
       <colgroup>
-        <col style={{ width: "42px" }} />
-        <col style={{ width: showArea ? "27%" : "33%" }} />
+        <col style={{ width: showArea ? "28%" : "34%" }} />
         {showArea && <col style={{ width: "18%" }} />}
         <col style={{ width: showArea ? "18%" : "26%" }} />
         <col style={{ width: "14%" }} />
@@ -2071,6 +2083,7 @@ export default function TaskTracker() {
         e.stopPropagation();
         const touch = e.touches[0];
         if (mobileDraggingTaskId === t.id) {
+          e.preventDefault();
           setMobileDragOffsetY(touch.clientY - mobileLongPressRef.current.y);
           const el = document.elementFromPoint(touch.clientX, touch.clientY);
           const rowEl = el && el.closest && el.closest("[data-task-id]");
@@ -2692,7 +2705,6 @@ export default function TaskTracker() {
         {showHeader && (
           <thead>
             <tr>
-              <th></th>
               <th>Tarea</th>
               {showArea && <th>Área</th>}
               <th className="col-center">Detalle</th>
@@ -2717,15 +2729,14 @@ export default function TaskTracker() {
                 onDragOver={(e) => { if (draggedTaskId && draggedTaskId !== t.id) { e.preventDefault(); e.stopPropagation(); setDragOverKey(`task:${t.id}`); } }}
                 onDrop={(e) => { e.preventDefault(); e.stopPropagation(); reorderTask(draggedTaskId, t.id); }}
               >
-                <td className={`td-check ${indent ? "td-check--indent" : ""}`}>
-                  <button className="row-check" onClick={() => mobileToggleDone(t.id, t.status === "Hecho")}>
-                    {t.status === "Hecho" || mobileCompletingIds.has(t.id)
-                      ? <CheckCircle2 size={14} color="var(--good)" />
-                      : <Circle size={14} color="var(--text-faint)" />}
-                  </button>
-                </td>
                 <td className={`td-title ${indent ? "td-indent" : ""}`} onDoubleClick={() => { if (editingTitleId !== t.id) setEditingTitleId(t.id); }}>
-                  {editingTitleId === t.id ? (
+                  <div className="td-title-row">
+                    <button className="row-check" onClick={() => mobileToggleDone(t.id, t.status === "Hecho")}>
+                      {t.status === "Hecho" || mobileCompletingIds.has(t.id)
+                        ? <CheckCircle2 size={14} color="var(--good)" />
+                        : <Circle size={14} color="var(--text-faint)" />}
+                    </button>
+                    {editingTitleId === t.id ? (
                     <input
                       autoFocus
                       className="title-input"
@@ -2752,6 +2763,7 @@ export default function TaskTracker() {
                       {t.title}
                     </span>
                   )}
+                  </div>
                 </td>
                 {showArea && (
                   <td>
@@ -3152,15 +3164,14 @@ export default function TaskTracker() {
         .task-title--done { color: var(--text-faint); text-decoration: line-through; }
         .note-btn { color: var(--text-faint); font-size: 13px; cursor: pointer; background: none; border: none; padding: 0; }
         .note-btn:hover { color: var(--text-dim); }
-        .td-check { text-align: center; }
-        .td-check--indent { padding-left: 18px; }
-        .row-check { background: none; border: none; padding: 2px; display: inline-flex; cursor: pointer; }
+        .row-check { background: none; border: none; padding: 2px; display: inline-flex; flex-shrink: 0; cursor: pointer; }
         .td-detalle { text-align: center; }
         .td-title { }
-        .td-indent { padding-left: 18px; }
+        .td-title-row { display: flex; align-items: center; gap: 10px; }
+        .td-indent .td-title-row { padding-left: 48px; }
         .col-center { text-align: center; }
         .note-input { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; color: var(--text-dim); font-size: 13px; padding: 5px 8px 5px 3px; width: 85%; outline: none; }
-        .title-input { background: var(--surface-2); border: 1px solid var(--amber); border-radius: 6px; color: var(--text); font-size: 14px; padding: 5px 8px 5px 3px; width: 100%; outline: none; }
+        .title-input { background: var(--surface-2); border: 1px solid var(--amber); border-radius: 6px; color: var(--text); font-size: 14px; padding: 5px 8px 5px 3px; width: 100%; flex: 1; min-width: 0; outline: none; }
         .note-text { color: var(--text-dim); font-size: 13.5px; }
 
         .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-dim); cursor: pointer; }
