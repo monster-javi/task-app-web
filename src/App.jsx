@@ -5,7 +5,7 @@ import {
   Search, Bell, ChevronDown, ChevronRight, ChevronLeft,
   Trash2, Loader2, Plus, Circle, CircleDot, CheckCircle2, Pencil, ListChecks,
   List as ListIcon, Flag, Calendar as CalendarIcon, ChevronsDown, ChevronsUp, X,
-  RefreshCw, Cloud, CloudOff, Download, Upload, Settings, Lock, Unlock, Info, GripVertical,
+  RefreshCw, Cloud, CloudOff, Download, Upload, Settings, Lock, Unlock, Info, GripVertical, Eye, EyeOff,
 } from "lucide-react";
 
 // ---------- Supabase ----------
@@ -645,7 +645,7 @@ export default function TaskTracker() {
     document.addEventListener("touchmove", blockScroll, { passive: false });
     return () => document.removeEventListener("touchmove", blockScroll);
   }, [mobileDraggingTaskId]);
-  const [mobileCollapsedProjects, setMobileCollapsedProjects] = useState(() => new Set());
+  const [mobileCollapsedProjects, setMobileCollapsedProjects] = useState(() => new Set(loadLocalPrefs().mobileCollapsedProjects || []));
   const [mobileInlineAddKey, setMobileInlineAddKey] = useState(null); // "areaId:projectId" or "areaId:general"
   const [mobileInlineAddText, setMobileInlineAddText] = useState("");
   const [mobileDragOffsetY, setMobileDragOffsetY] = useState(0);
@@ -696,14 +696,15 @@ export default function TaskTracker() {
   const [addingArea, setAddingArea] = useState(false);
   const [newAreaName, setNewAreaName] = useState("");
   const [colorPickerAreaId, setColorPickerAreaId] = useState(null);
-  const [expandedAreas, setExpandedAreas] = useState({});
+  const [hiddenAreaIds, setHiddenAreaIds] = useState(() => new Set(loadLocalPrefs().hiddenAreaIds || []));
+  const [showHiddenAreasPanel, setShowHiddenAreasPanel] = useState(false);
 
   const [addingProjectAreaId, setAddingProjectAreaId] = useState(null);
   const [newProjectName, setNewProjectName] = useState("");
   const [renamingProjectId, setRenamingProjectId] = useState(null);
   const [renameProjectAreaId, setRenameProjectAreaId] = useState(null);
   const [renameProjectValue, setRenameProjectValue] = useState("");
-  const [collapsedProjects, setCollapsedProjects] = useState({});
+  const [collapsedProjects, setCollapsedProjects] = useState(() => loadLocalPrefs().collapsedProjects || {});
   const [panelAddingProjectAreaId, setPanelAddingProjectAreaId] = useState(null);
   const [panelNewProjectName, setPanelNewProjectName] = useState("");
   const [panelAddingArea, setPanelAddingArea] = useState(false);
@@ -1317,8 +1318,16 @@ export default function TaskTracker() {
   const areaMap = useMemo(() => Object.fromEntries(areas.map((a) => [a.id, a])), [areas]);
 
   useEffect(() => {
-    saveLocalPrefs({ appLang, weekStartsSunday, holidayCountry, view, selectedAreaId });
-  }, [appLang, weekStartsSunday, holidayCountry, view, selectedAreaId]);
+    saveLocalPrefs({ appLang, weekStartsSunday, holidayCountry, view, selectedAreaId, collapsedProjects });
+  }, [appLang, weekStartsSunday, holidayCountry, view, selectedAreaId, collapsedProjects]);
+
+  useEffect(() => {
+    saveLocalPrefs({ hiddenAreaIds: Array.from(hiddenAreaIds) });
+  }, [hiddenAreaIds]);
+
+  useEffect(() => {
+    saveLocalPrefs({ mobileCollapsedProjects: Array.from(mobileCollapsedProjects) });
+  }, [mobileCollapsedProjects]);
 
   useEffect(() => {
     // Only remember "areas" (nivel 1) or "area" (nivel 2) as a landing spot —
@@ -1350,6 +1359,7 @@ export default function TaskTracker() {
   const orderedAreas = useMemo(() => {
     return [...areas].sort((a, b) => (isGeneralArea(a) ? -1 : 0) - (isGeneralArea(b) ? -1 : 0));
   }, [areas]);
+  const visibleOrderedAreas = useMemo(() => orderedAreas.filter((a) => !hiddenAreaIds.has(a.id)), [orderedAreas, hiddenAreaIds]);
 
   const pendientes = tasks.filter((t) => t.status !== "Hecho" || mobileCompletingIds.has(t.id)).length;
   const vencidas = tasks.filter((t) => isOverdue(t.date, t.status) || mobileCompletingIds.has(t.id)).length;
@@ -1384,7 +1394,7 @@ export default function TaskTracker() {
       if (!byArea[t.areaId]) byArea[t.areaId] = [];
       byArea[t.areaId].push(t);
     });
-    const relevantAreas = selectedAreaId === "all" ? orderedAreas : orderedAreas.filter((a) => a.id === selectedAreaId);
+    const relevantAreas = selectedAreaId === "all" ? visibleOrderedAreas : orderedAreas.filter((a) => a.id === selectedAreaId);
     return relevantAreas
       .map((a) => {
         const allTasks = byArea[a.id] || [];
@@ -1403,7 +1413,7 @@ export default function TaskTracker() {
         return { area: a, allTasks, noProject, projectGroups };
       })
       .filter((g) => !isSearching || g.allTasks.length > 0);
-  }, [visibleTasks, orderedAreas, selectedAreaId, search]);
+  }, [visibleTasks, orderedAreas, visibleOrderedAreas, selectedAreaId, search]);
 
   const groupedByPriority = useMemo(() => {
     const buckets = { Alta: [], Media: [], Baja: [] };
@@ -1647,17 +1657,6 @@ export default function TaskTracker() {
 
   function toggleCollapse(areaId) {
     setCollapsed((prev) => ({ ...prev, [areaId]: !prev[areaId] }));
-  }
-
-  function toggleExpand(areaId) {
-    setExpandedAreas((prev) => ({ ...prev, [areaId]: !prev[areaId] }));
-  }
-
-  function toggleAllProjectsExpanded() {
-    const allExpanded = areas.every((a) => expandedAreas[a.id]);
-    const next = {};
-    areas.forEach((a) => { next[a.id] = !allExpanded; });
-    setExpandedAreas(next);
   }
 
   function createArea() {
@@ -2565,10 +2564,17 @@ export default function TaskTracker() {
                     className="m-project-header"
                     onClick={() => toggleMobileProjectCollapse(p.id)}
                   >
-                    <ChevronRight size={13} className={`m-project-chevron ${collapsed ? "" : "m-project-chevron--open"}`} />
                     <span className="m-project-dot" style={{ background: area.color }} />
                     <span className="m-project-name" style={{ color: area.color }}>{p.name.toUpperCase()}</span>
                     <span className="m-project-count">{projectTaskCount}</span>
+                    <span className="m-project-actions">
+                      <button className="m-project-action-btn" onClick={(e) => { e.stopPropagation(); startRenameProject(area.id, p); }}>
+                        <Pencil size={14} />
+                      </button>
+                      <button className="m-project-action-btn" onClick={(e) => { e.stopPropagation(); setDeleteTarget({ type: "project", id: p.id, areaId: area.id }); }}>
+                        <Trash2 size={14} />
+                      </button>
+                    </span>
                   </div>
                 )}
                 {!collapsed && (
@@ -3014,6 +3020,16 @@ export default function TaskTracker() {
         .side-label-row .side-label { margin: 0; padding: 0; }
         .side-label-action { background: none; border: none; color: var(--text-faint); cursor: pointer; padding: 3px; border-radius: 5px; display: flex; }
         .side-label-action:hover { color: var(--text-dim); background: var(--surface-2); }
+        .hidden-areas-block { margin: 10px 6px 4px; }
+        .hidden-areas-toggle {
+          background: none; border: none; color: var(--text-faint); font-size: 11.5px; cursor: pointer;
+          padding: 4px 2px; text-decoration: underline; text-decoration-color: transparent;
+        }
+        .hidden-areas-toggle:hover { color: var(--text-dim); text-decoration-color: var(--text-faint); }
+        .hidden-areas-list { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+        .hidden-area-row { display: flex; align-items: center; gap: 8px; padding: 6px 6px; border-radius: 8px; }
+        .hidden-area-row:hover { background: var(--surface-2); }
+        .hidden-area-name { flex: 1; font-size: 12.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .side-item {
           display: flex; align-items: center; justify-content: space-between;
           padding: 7px 8px; border-radius: 7px; font-size: 14px; color: var(--text-dim);
@@ -3186,12 +3202,14 @@ export default function TaskTracker() {
         .chev { color: var(--text-faint); }
 
         .subgroup { }
-        .subgroup-head { display: flex; align-items: center; gap: 8px; padding: 10px 16px 10px 26px; cursor: pointer; user-select: none; }
+        .subgroup-head { display: flex; align-items: center; gap: 8px; padding: 10px 16px; cursor: pointer; user-select: none; }
         .subgroup-head:hover { background: var(--surface-2); }
-        .subgroup-chev { display: flex; color: var(--text-dim); flex-shrink: 0; }
         .subgroup-dot { width: 6px; height: 6px; border-radius: 50%; }
-        .subgroup-name { flex: 1; font-size: 14px; font-weight: 800; letter-spacing: 0.03em; text-transform: uppercase; }
-        .subgroup-count { font-size: 11.5px; color: var(--text-dim); background: var(--surface-2); padding: 3px 9px; border-radius: 999px; }
+        .subgroup-name { flex: 1; font-size: 15px; font-weight: 800; letter-spacing: 0.03em; text-transform: uppercase; }
+        .subgroup-count { font-size: 12.5px; color: var(--text-dim); background: var(--surface-2); padding: 3px 9px; border-radius: 999px; }
+        .subgroup-actions { display: flex; align-items: center; gap: 4px; margin-left: 4px; }
+        .subgroup-action-btn { background: none; border: none; padding: 5px; border-radius: 6px; color: var(--text-faint); display: flex; }
+        .subgroup-action-btn:hover { color: var(--text); background: var(--surface); }
 
         .quick-add-row { display: flex; align-items: center; gap: 8px; padding: 9px 16px; border-top: 1px solid var(--border); }
         .quick-add-row--ghost { cursor: text; border-top: 1px solid var(--border); }
@@ -3510,13 +3528,13 @@ export default function TaskTracker() {
           .m-hide-done--active { color: var(--amber); border-color: rgba(232,163,61,0.4); }
 
           .m-project-block { margin-bottom: 18px; }
-          .m-project-tasks { padding-left: 18px; }
+          .m-project-tasks { }
           .m-project-header { display: flex; align-items: center; gap: 8px; padding: 8px 4px; cursor: pointer; }
-          .m-project-chevron { color: var(--text-faint); transition: transform 0.15s; flex-shrink: 0; }
-          .m-project-chevron--open { transform: rotate(90deg); }
           .m-project-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
-          .m-project-name { flex: 1; font-size: 16.5px; font-weight: 700; letter-spacing: 0.03em; }
-          .m-project-count { font-size: 11px; color: var(--text-faint); background: var(--surface-2); padding: 2px 7px; border-radius: 999px; }
+          .m-project-name { flex: 1; font-size: 17.5px; font-weight: 700; letter-spacing: 0.03em; }
+          .m-project-count { font-size: 12px; color: var(--text-faint); background: var(--surface-2); padding: 2px 7px; border-radius: 999px; }
+          .m-project-actions { display: flex; align-items: center; gap: 2px; }
+          .m-project-action-btn { background: none; border: none; padding: 6px; border-radius: 6px; color: var(--text-faint); display: flex; }
 
           .m-inline-add-zone { min-height: 34px; cursor: text; -webkit-user-select: none; user-select: none; }
           .m-inline-add-zone--active { min-height: 0; padding: 6px 4px; }
@@ -3632,11 +3650,6 @@ export default function TaskTracker() {
 
         <div className="side-label-row">
           <span className="side-label">ÁREAS</span>
-          {areas.length > 0 && (
-            <button className="side-label-action" onClick={toggleAllProjectsExpanded} title="Desplegar/colapsar todos los proyectos">
-              {areas.every((a) => expandedAreas[a.id]) ? <ChevronsUp size={12} /> : <ChevronsDown size={12} />}
-            </button>
-          )}
         </div>
         <div className={`side-item ${selectedAreaId === "all" ? "side-item--active" : ""}`} onClick={() => selectArea("all")}>
           <span className="side-item-left">
@@ -3646,121 +3659,99 @@ export default function TaskTracker() {
           <span className="side-count mono">{tasks.filter((t) => t.status !== "Hecho").length}</span>
         </div>
 
-        {orderedAreas.map((a) => (
-          <React.Fragment key={a.id}>
-            <div
-              className={`side-item ${selectedAreaId === a.id && !selectedProjectId ? "side-item--active" : ""}`}
-              onClick={() => { if (renamingAreaId !== a.id) selectArea(a.id); }}
-              onDoubleClick={() => { if (renamingAreaId !== a.id) toggleExpand(a.id); }}
-            >
-              {renamingAreaId === a.id ? (
-                <input
-                  ref={renameInputRef}
-                  className="rename-input"
-                  value={renameValue}
-                  onClick={(e) => e.stopPropagation()}
-                  onChange={(e) => setRenameValue(e.target.value)}
-                  onBlur={discardRename}
-                  onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRenamingAreaId(null); }}
-                />
-              ) : (
-                <>
-                  <span className="side-item-left">
-                    <span className="side-dot-wrap">
-                      <button
-                        className="side-dot"
-                        style={{ background: a.color }}
-                        onClick={(e) => { e.stopPropagation(); setColorPickerAreaId(colorPickerAreaId === a.id ? null : a.id); }}
-                        title="Cambiar color"
-                      />
-                      {colorPickerAreaId === a.id && (
-                        <>
-                          <div className="popover-scrim" onClick={(e) => { e.stopPropagation(); setColorPickerAreaId(null); }} />
-                          <div className="color-popover" onClick={(e) => e.stopPropagation()}>
-                            {PALETTE.map((c) => (
-                              <button
-                                key={c}
-                                className="color-swatch"
-                                style={{ background: c }}
-                                onClick={() => { setAreaColor(a.id, c); setColorPickerAreaId(null); }}
-                              />
-                            ))}
-                          </div>
-                        </>
-                      )}
-                    </span>
-                    <span className="side-item-name">{a.name}</span>
-                  </span>
-                  <span className="side-item-right">
-                    <span className="side-count mono">{areaCounts[a.id] || 0}</span>
-                    {!isGeneralArea(a) && (
+        {visibleOrderedAreas.map((a) => (
+          <div
+            key={a.id}
+            className={`side-item ${selectedAreaId === a.id ? "side-item--active" : ""}`}
+            onClick={() => { if (renamingAreaId !== a.id) selectArea(a.id); }}
+          >
+            {renamingAreaId === a.id ? (
+              <input
+                ref={renameInputRef}
+                className="rename-input"
+                value={renameValue}
+                onClick={(e) => e.stopPropagation()}
+                onChange={(e) => setRenameValue(e.target.value)}
+                onBlur={discardRename}
+                onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRenamingAreaId(null); }}
+              />
+            ) : (
+              <>
+                <span className="side-item-left">
+                  <span className="side-dot-wrap">
+                    <button
+                      className="side-dot"
+                      style={{ background: a.color }}
+                      onClick={(e) => { e.stopPropagation(); setColorPickerAreaId(colorPickerAreaId === a.id ? null : a.id); }}
+                      title="Cambiar color"
+                    />
+                    {colorPickerAreaId === a.id && (
                       <>
-                        <button className="area-edit-btn" title="Renombrar área" onClick={(e) => { e.stopPropagation(); startRename(a); }}>
-                          <Pencil size={12} />
-                        </button>
-                        <button className="area-edit-btn area-edit-btn--danger" title="Eliminar área" onClick={(e) => { e.stopPropagation(); setDeleteTarget({ type: "area", id: a.id }); }}>
-                          <Trash2 size={12} />
-                        </button>
+                        <div className="popover-scrim" onClick={(e) => { e.stopPropagation(); setColorPickerAreaId(null); }} />
+                        <div className="color-popover" onClick={(e) => e.stopPropagation()}>
+                          {PALETTE.map((c) => (
+                            <button
+                              key={c}
+                              className="color-swatch"
+                              style={{ background: c }}
+                              onClick={() => { setAreaColor(a.id, c); setColorPickerAreaId(null); }}
+                            />
+                          ))}
+                        </div>
                       </>
                     )}
                   </span>
-                </>
-              )}
-            </div>
-
-            {expandedAreas[a.id] && (
-              <div className="project-list">
-                {(a.projects || []).map((p) => (
-                  <div
-                    key={p.id}
-                    className={`project-item ${selectedAreaId === a.id && selectedProjectId === p.id ? "project-item--active" : ""}`}
-                    onClick={() => { setSelectedAreaId(a.id); setSelectedProjectId(p.id); }}
-                    onDoubleClick={() => startRenameProject(a.id, p)}
+                  <span className="side-item-name">{a.name}</span>
+                </span>
+                <span className="side-item-right">
+                  <span className="side-count mono">{areaCounts[a.id] || 0}</span>
+                  <button
+                    className="area-edit-btn"
+                    title="Ocultar área"
+                    onClick={(e) => { e.stopPropagation(); setHiddenAreaIds((prev) => new Set(prev).add(a.id)); if (selectedAreaId === a.id) selectArea("all"); }}
                   >
-                    {renamingProjectId === p.id ? (
-                      <input
-                        ref={renameProjectInputRef}
-                        className="rename-project-input"
-                        value={renameProjectValue}
-                        onClick={(e) => e.stopPropagation()}
-                        onChange={(e) => setRenameProjectValue(e.target.value)}
-                        onBlur={discardRenameProject}
-                        onKeyDown={(e) => { if (e.key === "Enter") commitRenameProject(); if (e.key === "Escape") setRenamingProjectId(null); }}
-                      />
-                    ) : (
-                      <>
-                        <span className="project-dot" style={{ background: a.color }} />
-                        <span className="project-name">{p.name}</span>
-                        <span className="project-count mono">{projectCounts[p.id] || 0}</span>
-                        <button className="area-edit-btn" title="Renombrar proyecto" onClick={(e) => { e.stopPropagation(); startRenameProject(a.id, p); }}>
-                          <Pencil size={11} />
-                        </button>
-                        <button className="area-edit-btn area-edit-btn--danger" title="Eliminar proyecto" onClick={(e) => { e.stopPropagation(); setDeleteTarget({ type: "project", id: p.id, areaId: a.id }); }}>
-                          <Trash2 size={11} />
-                        </button>
-                      </>
-                    )}
+                    <EyeOff size={12} />
+                  </button>
+                  {!isGeneralArea(a) && (
+                    <>
+                      <button className="area-edit-btn" title="Renombrar área" onClick={(e) => { e.stopPropagation(); startRename(a); }}>
+                        <Pencil size={12} />
+                      </button>
+                      <button className="area-edit-btn area-edit-btn--danger" title="Eliminar área" onClick={(e) => { e.stopPropagation(); setDeleteTarget({ type: "area", id: a.id }); }}>
+                        <Trash2 size={12} />
+                      </button>
+                    </>
+                  )}
+                </span>
+              </>
+            )}
+          </div>
+        ))}
+
+        {hiddenAreaIds.size > 0 && (
+          <div className="hidden-areas-block">
+            <button className="hidden-areas-toggle" onClick={() => setShowHiddenAreasPanel((v) => !v)}>
+              {hiddenAreaIds.size} área{hiddenAreaIds.size !== 1 ? "s" : ""} oculta{hiddenAreaIds.size !== 1 ? "s" : ""}
+            </button>
+            {showHiddenAreasPanel && (
+              <div className="hidden-areas-list">
+                {orderedAreas.filter((a) => hiddenAreaIds.has(a.id)).map((a) => (
+                  <div key={a.id} className="hidden-area-row">
+                    <span className="side-dot" style={{ background: a.color }} />
+                    <span className="hidden-area-name">{a.name}</span>
+                    <button
+                      className="area-edit-btn"
+                      title="Mostrar de nuevo"
+                      onClick={() => setHiddenAreaIds((prev) => { const next = new Set(prev); next.delete(a.id); return next; })}
+                    >
+                      <Eye size={12} />
+                    </button>
                   </div>
                 ))}
-                {!isGeneralArea(a) && (
-                  addingProjectAreaId === a.id ? (
-                    <input
-                      ref={newProjectInputRef}
-                      className="new-project-input"
-                      placeholder="Nombre del proyecto..."
-                      value={newProjectName}
-                      onChange={(e) => setNewProjectName(e.target.value)}
-                      onBlur={() => createProject(a.id)}
-                      onKeyDown={(e) => { if (e.key === "Enter") createProject(a.id); if (e.key === "Escape") { setNewProjectName(""); setAddingProjectAreaId(null); } }}
-                    />
-                  ) : (
-                    <button className="add-project-btn" onClick={() => setAddingProjectAreaId(a.id)}><Plus size={11} /> Proyecto</button>
-                  )
-                )}
               </div>
             )}
-          </React.Fragment>
-        ))}
+          </div>
+        )}
 
         {addingArea ? (
           <input
@@ -3927,7 +3918,7 @@ export default function TaskTracker() {
                   {selectedAreaId === "all" ? (
                     <select value={manualArea} onChange={(e) => setManualArea(e.target.value)}>
                       <option value="">General</option>
-                      {orderedAreas.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                      {visibleOrderedAreas.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
                     </select>
                   ) : (
                     <span className="manual-area-fixed">
@@ -3981,7 +3972,9 @@ export default function TaskTracker() {
                             </tr>
                           </thead>
                         </table>
-                        {projectGroups.map(({ project, tasks: projTasks }) => (
+                        {projectGroups.map(({ project, tasks: projTasks }) => {
+                          const isRenamingThis = renamingProjectId === project.id && renameProjectAreaId === area.id;
+                          return (
                           <div
                             className={`subgroup ${dragOverKey === project.id ? "subgroup--dragover" : ""}`}
                             key={project.id}
@@ -3989,24 +3982,45 @@ export default function TaskTracker() {
                             onDragLeave={() => setDragOverKey((k) => (k === project.id ? null : k))}
                             onDrop={(e) => { e.preventDefault(); e.stopPropagation(); handleDropOnTarget(area.id, project.id); }}
                           >
+                            {isRenamingThis ? (
+                              <div className="subgroup-head">
+                                <span className="subgroup-dot" style={{ background: area.color }} />
+                                <input
+                                  ref={renameProjectInputRef}
+                                  className="rename-project-input"
+                                  value={renameProjectValue}
+                                  onChange={(e) => setRenameProjectValue(e.target.value)}
+                                  onBlur={discardRenameProject}
+                                  onKeyDown={(e) => { if (e.key === "Enter") commitRenameProject(); if (e.key === "Escape") setRenamingProjectId(null); }}
+                                />
+                              </div>
+                            ) : (
                             <div className="subgroup-head" onClick={() => toggleProjectCollapse(project.id)}>
-                              <span className="subgroup-chev">{collapsedProjects[project.id] ? <ChevronRight size={13} /> : <ChevronDown size={13} />}</span>
                               <span className="subgroup-dot" style={{ background: area.color }} />
                               <span className="subgroup-name" style={{ color: area.color }}>{project.name.toUpperCase()}</span>
                               <span className="subgroup-count mono">{projTasks.filter((t) => t.status !== "Hecho").length}</span>
+                              <span className="subgroup-actions">
+                                <button className="subgroup-action-btn" onClick={(e) => { e.stopPropagation(); startRenameProject(area.id, project); }} title="Renombrar proyecto">
+                                  <Pencil size={13} />
+                                </button>
+                                <button className="subgroup-action-btn" onClick={(e) => { e.stopPropagation(); setDeleteTarget({ type: "project", id: project.id, areaId: area.id }); }} title="Eliminar proyecto">
+                                  <Trash2 size={13} />
+                                </button>
+                              </span>
                             </div>
+                            )}
                             {!collapsedProjects[project.id] && (
                               <>
-                                {projTasks.length > 0 && renderTaskTable(projTasks, { indent: true })}
+                                {projTasks.length > 0 && renderTaskTable(projTasks, {})}
                                 <QuickAddRow
                                   placeholder=""
                                   onAdd={(title) => addQuickTask(area.id, project.id, title)}
-                                  indent
                                 />
                               </>
                             )}
                           </div>
-                        ))}
+                          );
+                        })}
                         <div
                           className={`subgroup ${dragOverKey === `noproject-${area.id}` ? "subgroup--dragover" : ""}`}
                           onDragOver={(e) => { e.preventDefault(); setDragOverKey(`noproject-${area.id}`); }}
