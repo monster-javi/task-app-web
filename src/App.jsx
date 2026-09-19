@@ -5,7 +5,7 @@ import {
   Search, Bell, ChevronDown, ChevronRight, ChevronLeft,
   Trash2, Loader2, Plus, Circle, CircleDot, CheckCircle2, Pencil, ListChecks,
   List as ListIcon, Flag, Calendar as CalendarIcon, ChevronsDown, ChevronsUp, X,
-  RefreshCw, Cloud, CloudOff, Download, Upload, Settings, Lock, Unlock, Info, GripVertical, Eye, EyeOff,
+  RefreshCw, Cloud, CloudOff, Download, Upload, Settings, Lock, Unlock, Info, GripVertical, EyeOff, Star,
 } from "lucide-react";
 
 // ---------- Supabase ----------
@@ -696,8 +696,7 @@ export default function TaskTracker() {
   const [addingArea, setAddingArea] = useState(false);
   const [newAreaName, setNewAreaName] = useState("");
   const [colorPickerAreaId, setColorPickerAreaId] = useState(null);
-  const [hiddenAreaIds, setHiddenAreaIds] = useState(() => new Set(loadLocalPrefs().hiddenAreaIds || []));
-  const [showHiddenAreasPanel, setShowHiddenAreasPanel] = useState(false);
+  const [areaFilterMode, setAreaFilterMode] = useState(() => loadLocalPrefs().areaFilterMode || "off"); // "off" | "solo" | "mute"
 
   const [addingProjectAreaId, setAddingProjectAreaId] = useState(null);
   const [newProjectName, setNewProjectName] = useState("");
@@ -1322,8 +1321,8 @@ export default function TaskTracker() {
   }, [appLang, weekStartsSunday, holidayCountry, view, selectedAreaId, collapsedProjects]);
 
   useEffect(() => {
-    saveLocalPrefs({ hiddenAreaIds: Array.from(hiddenAreaIds) });
-  }, [hiddenAreaIds]);
+    saveLocalPrefs({ areaFilterMode });
+  }, [areaFilterMode]);
 
   useEffect(() => {
     saveLocalPrefs({ mobileCollapsedProjects: Array.from(mobileCollapsedProjects) });
@@ -1359,7 +1358,15 @@ export default function TaskTracker() {
   const orderedAreas = useMemo(() => {
     return [...areas].sort((a, b) => (isGeneralArea(a) ? -1 : 0) - (isGeneralArea(b) ? -1 : 0));
   }, [areas]);
-  const visibleOrderedAreas = useMemo(() => orderedAreas.filter((a) => !hiddenAreaIds.has(a.id)), [orderedAreas, hiddenAreaIds]);
+  const visibleOrderedAreas = useMemo(() => {
+    if (areaFilterMode === "solo") return orderedAreas.filter((a) => a.favorite);
+    if (areaFilterMode === "mute") return orderedAreas.filter((a) => !a.favorite);
+    return orderedAreas;
+  }, [orderedAreas, areaFilterMode]);
+
+  function toggleAreaFavorite(id) {
+    setAreas((prev) => prev.map((a) => (a.id === id ? { ...a, favorite: !a.favorite } : a)));
+  }
 
   const pendientes = tasks.filter((t) => t.status !== "Hecho" || mobileCompletingIds.has(t.id)).length;
   const vencidas = tasks.filter((t) => isOverdue(t.date, t.status) || mobileCompletingIds.has(t.id)).length;
@@ -1890,7 +1897,7 @@ export default function TaskTracker() {
           ? { ...a, projects: (a.projects || []).filter((p) => p.id !== deleteTarget.id) }
           : a
       )));
-      setTasks((prev) => prev.map((t) => (t.projectId === deleteTarget.id ? { ...t, projectId: null } : t)));
+      setTasks((prev) => prev.filter((t) => t.projectId !== deleteTarget.id));
       if (selectedProjectId === deleteTarget.id) setSelectedProjectId(null);
       showToast("Proyecto eliminado");
     } else if (deleteTarget.type === "task") {
@@ -2300,10 +2307,14 @@ export default function TaskTracker() {
             <button className={`m-hide-done ${hideCompleted ? "m-hide-done--active" : ""}`} onClick={() => setHideCompleted((v) => !v)} title="Ocultar hechas">
               {hideCompleted ? <CheckCircle2 size={18} /> : <Circle size={18} />}
             </button>
-            <button className="iconbtn icon-only m-top-iconbtn" onClick={() => setShowSettingsPanel(true)} title="Configuración"><Settings size={19} /></button>
-            <button className="iconbtn icon-only m-top-iconbtn" onClick={() => setShowEncSettings(true)} title="Cifrado">
-              {isEncrypted ? <Lock size={19} /> : <Unlock size={19} />}
+            <button
+              className={`iconbtn icon-only m-top-iconbtn ${areaFilterMode !== "off" ? "m-fav-btn--active" : ""}`}
+              onClick={() => setAreaFilterMode((m) => (m === "off" ? "solo" : m === "solo" ? "mute" : "off"))}
+              title={areaFilterMode === "solo" ? "Mostrando solo favoritas — tocá para ocultarlas" : areaFilterMode === "mute" ? "Ocultando favoritas — tocá para apagar el filtro" : "Filtro de favoritas (apagado)"}
+            >
+              {areaFilterMode === "mute" ? <EyeOff size={19} /> : <Star size={19} fill={areaFilterMode === "solo" ? "currentColor" : "none"} />}
             </button>
+            <button className="iconbtn icon-only m-top-iconbtn" onClick={() => setShowSettingsPanel(true)} title="Configuración"><Settings size={19} /></button>
             {syncError && (
               <button className="iconbtn icon-only m-top-iconbtn sync-indicator--error" onClick={saveDiff} title="No se pudo guardar — tocá para reintentar">
                 <CloudOff size={19} />
@@ -2361,7 +2372,7 @@ export default function TaskTracker() {
             </>
           ) : (
             <>
-              {orderedAreas.map((a) => (
+              {visibleOrderedAreas.map((a) => (
                 renamingAreaId === a.id ? (
                   <div key={a.id} className="m-area-card m-area-card--renaming">
                     <span className="m-area-bar" style={{ background: a.color }} />
@@ -2385,6 +2396,13 @@ export default function TaskTracker() {
                 ) : (
                   <button key={a.id} className="m-area-card" onClick={() => openMobileArea(a.id)} {...areaSwipeHandlers(a.id)}>
                     <span className="m-area-bar" style={{ background: a.color }} />
+                    <span
+                      role="button"
+                      className={`fav-star-btn ${a.favorite ? "fav-star-btn--active" : ""}`}
+                      onClick={(e) => { e.stopPropagation(); toggleAreaFavorite(a.id); }}
+                    >
+                      <Star size={15} fill={a.favorite ? "currentColor" : "none"} />
+                    </span>
                     <span className="m-area-name">{a.name.toUpperCase()}</span>
                     <span className="m-area-count">{mobileCountFor(a.id)} pendientes</span>
                     <ChevronRight size={16} className="m-area-chevron" />
@@ -3020,16 +3038,8 @@ export default function TaskTracker() {
         .side-label-row .side-label { margin: 0; padding: 0; }
         .side-label-action { background: none; border: none; color: var(--text-faint); cursor: pointer; padding: 3px; border-radius: 5px; display: flex; }
         .side-label-action:hover { color: var(--text-dim); background: var(--surface-2); }
-        .hidden-areas-block { margin: 10px 6px 4px; }
-        .hidden-areas-toggle {
-          background: none; border: none; color: var(--text-faint); font-size: 11.5px; cursor: pointer;
-          padding: 4px 2px; text-decoration: underline; text-decoration-color: transparent;
-        }
-        .hidden-areas-toggle:hover { color: var(--text-dim); text-decoration-color: var(--text-faint); }
-        .hidden-areas-list { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
-        .hidden-area-row { display: flex; align-items: center; gap: 8px; padding: 6px 6px; border-radius: 8px; }
-        .hidden-area-row:hover { background: var(--surface-2); }
-        .hidden-area-name { flex: 1; font-size: 12.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .fav-star-btn { background: none; border: none; padding: 2px; color: var(--text-faint); display: flex; flex-shrink: 0; }
+        .fav-star-btn--active { color: var(--amber); }
         .side-item {
           display: flex; align-items: center; justify-content: space-between;
           padding: 7px 8px; border-radius: 7px; font-size: 14px; color: var(--text-dim);
@@ -3131,6 +3141,8 @@ export default function TaskTracker() {
         }
         .search-wrap input { background: none; border: none; outline: none; color: var(--text); font-size: 13.5px; width: 100%; }
         .search-wrap input::placeholder { color: var(--text-faint); }
+        .fav-filter-btn { display: flex; align-items: center; gap: 6px; }
+        .fav-filter-btn--active { color: var(--amber); border-color: rgba(232,163,61,0.4); background: rgba(232,163,61,0.08); }
         .topbar-spacer { flex: 1; }
         .counter { font-size: 12.5px; padding: 6px 10px; border-radius: 7px; background: var(--surface); border: 1px solid var(--border); color: var(--text-dim); display: flex; gap: 5px; align-items: center; white-space: nowrap; flex-shrink: 0; }
         .counter b { color: var(--text); font-weight: 700; }
@@ -3144,6 +3156,7 @@ export default function TaskTracker() {
         .icon-only { padding: 6px 7px; }
         .sync-indicator { cursor: default; color: var(--text-dim); }
         .sync-indicator--error { color: var(--alta) !important; border-color: rgba(240,85,75,0.4) !important; }
+        .m-fav-btn--active { color: var(--amber) !important; border-color: rgba(232,163,61,0.4) !important; }
         .sync-indicator:hover { color: var(--text-dim); border-color: var(--border); }
         .lang-select { padding: 6px 8px; cursor: pointer; font-size: 12px; font-weight: 700; }
 
@@ -3211,7 +3224,7 @@ export default function TaskTracker() {
         .subgroup-action-btn { background: none; border: none; padding: 5px; border-radius: 6px; color: var(--text-faint); display: flex; }
         .subgroup-action-btn:hover { color: var(--text); background: var(--surface); }
 
-        .quick-add-row { display: flex; align-items: center; gap: 8px; padding: 9px 16px; border-top: 1px solid var(--border); }
+        .quick-add-row { display: flex; align-items: center; gap: 8px; padding: 9px 16px; border-top: 1px solid var(--border); min-height: 38px; box-sizing: border-box; }
         .quick-add-row--ghost { cursor: text; border-top: 1px solid var(--border); }
         .quick-add-row--indent { padding-left: 40px; }
         .quick-add-input { flex: 1; background: none; border: none; outline: none; color: var(--text-dim); font-size: 13.5px; }
@@ -3701,17 +3714,17 @@ export default function TaskTracker() {
                       </>
                     )}
                   </span>
+                  <button
+                    className={`fav-star-btn ${a.favorite ? "fav-star-btn--active" : ""}`}
+                    onClick={(e) => { e.stopPropagation(); toggleAreaFavorite(a.id); }}
+                    title={a.favorite ? "Quitar de favoritos" : "Marcar como favorita"}
+                  >
+                    <Star size={13} fill={a.favorite ? "currentColor" : "none"} />
+                  </button>
                   <span className="side-item-name">{a.name}</span>
                 </span>
                 <span className="side-item-right">
                   <span className="side-count mono">{areaCounts[a.id] || 0}</span>
-                  <button
-                    className="area-edit-btn"
-                    title="Ocultar área"
-                    onClick={(e) => { e.stopPropagation(); setHiddenAreaIds((prev) => new Set(prev).add(a.id)); if (selectedAreaId === a.id) selectArea("all"); }}
-                  >
-                    <EyeOff size={12} />
-                  </button>
                   {!isGeneralArea(a) && (
                     <>
                       <button className="area-edit-btn" title="Renombrar área" onClick={(e) => { e.stopPropagation(); startRename(a); }}>
@@ -3727,31 +3740,6 @@ export default function TaskTracker() {
             )}
           </div>
         ))}
-
-        {hiddenAreaIds.size > 0 && (
-          <div className="hidden-areas-block">
-            <button className="hidden-areas-toggle" onClick={() => setShowHiddenAreasPanel((v) => !v)}>
-              {hiddenAreaIds.size} área{hiddenAreaIds.size !== 1 ? "s" : ""} oculta{hiddenAreaIds.size !== 1 ? "s" : ""}
-            </button>
-            {showHiddenAreasPanel && (
-              <div className="hidden-areas-list">
-                {orderedAreas.filter((a) => hiddenAreaIds.has(a.id)).map((a) => (
-                  <div key={a.id} className="hidden-area-row">
-                    <span className="side-dot" style={{ background: a.color }} />
-                    <span className="hidden-area-name">{a.name}</span>
-                    <button
-                      className="area-edit-btn"
-                      title="Mostrar de nuevo"
-                      onClick={() => setHiddenAreaIds((prev) => { const next = new Set(prev); next.delete(a.id); return next; })}
-                    >
-                      <Eye size={12} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
 
         {addingArea ? (
           <input
@@ -3808,6 +3796,20 @@ export default function TaskTracker() {
             <Search size={13} color="var(--text-faint)" />
             <input placeholder="Buscar..." value={search} onChange={(e) => setSearch(e.target.value)} />
           </div>
+          <button
+            className={`iconbtn fav-filter-btn ${areaFilterMode === "solo" ? "fav-filter-btn--active" : ""}`}
+            onClick={() => setAreaFilterMode((m) => (m === "solo" ? "off" : "solo"))}
+            title="Mostrar solo las áreas favoritas"
+          >
+            <Star size={13} /> Favoritos
+          </button>
+          <button
+            className={`iconbtn icon-only fav-filter-btn ${areaFilterMode === "mute" ? "fav-filter-btn--active" : ""}`}
+            onClick={() => setAreaFilterMode((m) => (m === "mute" ? "off" : "mute"))}
+            title="Ocultar las áreas favoritas"
+          >
+            <EyeOff size={13} />
+          </button>
           <div className="topbar-spacer" />
           <div className="counter"><span>Pendientes</span><b>{pendientes}</b></div>
           <div className={`counter ${vencidas > 0 ? "counter--warn" : ""}`}><span>Vencidas</span><b>{vencidas}</b></div>
@@ -4379,6 +4381,17 @@ export default function TaskTracker() {
 
             {!confirmingWipe ? (
               <>
+                <div className="settings-group-title">Seguridad</div>
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-row-title">Cifrado</div>
+                    <div className="settings-row-desc">{isEncrypted ? "Tus datos están cifrados." : "Tus datos no están cifrados."}</div>
+                  </div>
+                  <button className="modal-btn modal-btn--cancel" onClick={() => { setShowSettingsPanel(false); setShowEncSettings(true); }}>
+                    {isEncrypted ? <Lock size={14} /> : <Unlock size={14} />} Ver cifrado
+                  </button>
+                </div>
+
                 <div className="settings-group-title">Calendario</div>
                 <div className="settings-row">
                   <div>
