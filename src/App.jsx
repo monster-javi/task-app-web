@@ -111,10 +111,13 @@ function dateToISOLocal(d) {
   return isoOf(d.getFullYear(), d.getMonth(), d.getDate());
 }
 
-// Fixed-date public holidays only (month-day, no year) — movable ones tied to
-// Easter aren't included here, that needs real date math we haven't built.
+// Fixed-date public holidays (month-day, no year).
 const HOLIDAYS_BY_COUNTRY = {
-  AR: [["01-01", "Año Nuevo"], ["05-01", "Día del Trabajador"], ["05-25", "Revolución de Mayo"], ["06-20", "Día de la Bandera"], ["07-09", "Día de la Independencia"], ["12-08", "Inmaculada Concepción"], ["12-25", "Navidad"]],
+  AR: [
+    ["01-01", "Año Nuevo"], ["03-24", "Día de la Memoria"], ["04-02", "Día del Veterano y de los Caídos en Malvinas"],
+    ["05-01", "Día del Trabajador"], ["05-25", "Revolución de Mayo"], ["06-17", "Paso a la Inmortalidad del Gral. Güemes"],
+    ["06-20", "Día de la Bandera"], ["07-09", "Día de la Independencia"], ["12-08", "Inmaculada Concepción"], ["12-25", "Navidad"],
+  ],
   ES: [["01-01", "Año Nuevo"], ["01-06", "Reyes"], ["05-01", "Día del Trabajador"], ["08-15", "Asunción"], ["10-12", "Fiesta Nacional"], ["11-01", "Todos los Santos"], ["12-06", "Día de la Constitución"], ["12-08", "Inmaculada Concepción"], ["12-25", "Navidad"]],
   MX: [["01-01", "Año Nuevo"], ["05-01", "Día del Trabajo"], ["09-16", "Independencia"], ["11-20", "Revolución"], ["12-25", "Navidad"]],
   US: [["01-01", "New Year's Day"], ["07-04", "Independence Day"], ["11-11", "Veterans Day"], ["12-25", "Christmas"]],
@@ -123,13 +126,58 @@ const HOLIDAYS_BY_COUNTRY = {
   none: [],
 };
 
+// Anonymous Gregorian algorithm — Easter Sunday for a given year.
+function computeEasterSunday(year) {
+  const a = year % 19, b = Math.floor(year / 100), c = year % 100;
+  const d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31); // 3 = March, 4 = April
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(year, month - 1, day);
+}
+
+// Argentina moves a handful of holidays to the nearest Monday by decree
+// (1584/2010): Tue/Wed → preceding Monday, Thu/Fri → following Monday.
+function nearestMonday(date) {
+  const dow = date.getDay(); // 0 Sun .. 6 Sat
+  const d = new Date(date);
+  if (dow === 2) d.setDate(d.getDate() - 1);
+  else if (dow === 3) d.setDate(d.getDate() - 2);
+  else if (dow === 4) d.setDate(d.getDate() + 4);
+  else if (dow === 5) d.setDate(d.getDate() + 3);
+  return d;
+}
+
+function movableHolidaysFor(countryCode, year) {
+  if (countryCode !== "AR") return [];
+  const easter = computeEasterSunday(year);
+  const addDays = (n) => { const d = new Date(easter); d.setDate(d.getDate() + n); return d; };
+  const sanMartin = nearestMonday(new Date(year, 7, 17));
+  const diversidad = nearestMonday(new Date(year, 9, 12));
+  const soberania = nearestMonday(new Date(year, 10, 20));
+  return [
+    [dateToISOLocal(addDays(-48)), "Carnaval"],
+    [dateToISOLocal(addDays(-47)), "Carnaval"],
+    [dateToISOLocal(addDays(-2)), "Viernes Santo"],
+    [dateToISOLocal(sanMartin), "Paso a la Inmortalidad del Gral. San Martín"],
+    [dateToISOLocal(diversidad), "Día del Respeto a la Diversidad Cultural"],
+    [dateToISOLocal(soberania), "Día de la Soberanía Nacional"],
+  ];
+}
+
 function isHoliday(iso, countryCode) {
   const list = HOLIDAYS_BY_COUNTRY[countryCode];
   if (!list || !list.length) return null;
   const monthDay = iso.slice(5); // "MM-DD"
   const hit = list.find(([md]) => md === monthDay);
-  return hit ? hit[1] : null;
+  if (hit) return hit[1];
+  const year = Number(iso.slice(0, 4));
+  const movableHit = movableHolidaysFor(countryCode, year).find(([d]) => d === iso);
+  return movableHit ? movableHit[1] : null;
 }
+
 
 function todayISO() {
   return dateToISOLocal(new Date());
@@ -463,7 +511,7 @@ function StatusPill({ value, onClick }) {
   );
 }
 
-function DateField({ value, onChange, overdue }) {
+function DateField({ value, onChange, overdue, weekStartsSunday }) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState(null);
   const btnRef = useRef(null);
@@ -475,7 +523,8 @@ function DateField({ value, onChange, overdue }) {
     const t = new Date();
     return { year: t.getFullYear(), month: t.getMonth() };
   });
-  const grid = useMemo(() => buildMonthGrid(cursor.year, cursor.month), [cursor]);
+  const grid = useMemo(() => buildMonthGrid(cursor.year, cursor.month, weekStartsSunday), [cursor, weekStartsSunday]);
+  const weekdayLabels = weekStartsSunday ? WEEKDAY_LABELS_SUN_FIRST : WEEKDAY_LABELS;
 
   const POP_W = 220;
   const POP_H = 300;
@@ -526,7 +575,7 @@ function DateField({ value, onChange, overdue }) {
               <button type="button" className="cal-nav-btn" onClick={() => changeMonth(1)}><ChevronRight size={13} /></button>
             </div>
             <div className="datefield-grid">
-              {WEEKDAY_LABELS.map((w) => <div key={w} className="datefield-wd">{w[0]}</div>)}
+              {weekdayLabels.map((w) => <div key={w} className="datefield-wd">{w[0]}</div>)}
               {grid.map((cell) => (
                 <button
                   type="button"
@@ -669,6 +718,7 @@ export default function TaskTracker() {
   const [selectedAreaId, setSelectedAreaId] = useState(() => loadLocalPrefs().selectedAreaId || "all");
   const [selectedProjectId, setSelectedProjectId] = useState(null);
   const [hideCompleted, setHideCompleted] = useState(true);
+  const [desktopExpandedFilter, setDesktopExpandedFilter] = useState(null); // null | "pendientes" | "vencidas"
   const [appLang, setAppLang] = useState(() => loadLocalPrefs().appLang || "es");
   const [weekStartsSunday, setWeekStartsSunday] = useState(() => !!loadLocalPrefs().weekStartsSunday);
   const [holidayCountry, setHolidayCountry] = useState(() => loadLocalPrefs().holidayCountry || "AR");
@@ -1181,14 +1231,14 @@ export default function TaskTracker() {
       const writes = [];
       const deleteKeys = [];
 
-      const areasJson = JSON.stringify(areas);
+      const areasJson = JSON.stringify(areasRef.current);
       if (areasJson !== areasSnapshotRef.current) {
-        writes.push({ rowKey: "areas", value: key ? await encryptRowValue(key, areas) : areasJson });
+        writes.push({ rowKey: "areas", value: key ? await encryptRowValue(key, areasRef.current) : areasJson });
       }
 
       const prevMap = taskSnapshotsRef.current;
       const currentIds = new Set();
-      for (const t of tasks) {
+      for (const t of tasksRef.current) {
         currentIds.add(t.id);
         const json = JSON.stringify(t);
         if (prevMap.get(t.id) !== json) {
@@ -1216,7 +1266,7 @@ export default function TaskTracker() {
       }
 
       areasSnapshotRef.current = areasJson;
-      for (const t of tasks) taskSnapshotsRef.current.set(t.id, JSON.stringify(t));
+      for (const t of tasksRef.current) taskSnapshotsRef.current.set(t.id, JSON.stringify(t));
       for (const dk of deleteKeys) taskSnapshotsRef.current.delete(dk.slice(5));
 
       setLastSyncAt(new Date(updatedAt).getTime());
@@ -1316,6 +1366,11 @@ export default function TaskTracker() {
 
   const areaMap = useMemo(() => Object.fromEntries(areas.map((a) => [a.id, a])), [areas]);
 
+  const tasksRef = useRef(tasks);
+  const areasRef = useRef(areas);
+  useEffect(() => { tasksRef.current = tasks; }, [tasks]);
+  useEffect(() => { areasRef.current = areas; }, [areas]);
+
   useEffect(() => {
     saveLocalPrefs({ appLang, weekStartsSunday, holidayCountry, view, selectedAreaId, collapsedProjects });
   }, [appLang, weekStartsSunday, holidayCountry, view, selectedAreaId, collapsedProjects]);
@@ -1390,9 +1445,15 @@ export default function TaskTracker() {
       if (selectedAreaId !== "all" && selectedProjectId && t.projectId !== selectedProjectId) return false;
       if (hideCompleted && t.status === "Hecho" && !mobileCompletingIds.has(t.id)) return false;
       if (search.trim() && !t.title.toLowerCase().includes(search.toLowerCase())) return false;
+      if (areaFilterMode !== "off") {
+        const taskArea = areaMap[t.areaId];
+        const isFav = !!(taskArea && taskArea.favorite);
+        if (areaFilterMode === "solo" && !isFav) return false;
+        if (areaFilterMode === "mute" && isFav) return false;
+      }
       return true;
     });
-  }, [tasks, selectedAreaId, selectedProjectId, hideCompleted, search, mobileCompletingIds]);
+  }, [tasks, selectedAreaId, selectedProjectId, hideCompleted, search, mobileCompletingIds, areaFilterMode, areaMap]);
 
   const grouped = useMemo(() => {
     const isSearching = !!search.trim();
@@ -1474,11 +1535,17 @@ export default function TaskTracker() {
       if (!t.date) return;
       if (selectedAreaId !== "all" && t.areaId !== selectedAreaId) return;
       if (selectedAreaId !== "all" && selectedProjectId && t.projectId !== selectedProjectId) return;
+      if (areaFilterMode !== "off") {
+        const taskArea = areaMap[t.areaId];
+        const isFav = !!(taskArea && taskArea.favorite);
+        if (areaFilterMode === "solo" && !isFav) return;
+        if (areaFilterMode === "mute" && isFav) return;
+      }
       if (!map[t.date]) map[t.date] = [];
       map[t.date].push(t);
     });
     return map;
-  }, [tasks, selectedAreaId, selectedProjectId]);
+  }, [tasks, selectedAreaId, selectedProjectId, areaFilterMode, areaMap]);
 
   const monthGrid = useMemo(() => buildMonthGrid(calCursor.year, calCursor.month, weekStartsSunday), [calCursor, weekStartsSunday]);
   const weekDays = useMemo(() => buildWeekDays(weekAnchor, weekStartsSunday), [weekAnchor, weekStartsSunday]);
@@ -2696,7 +2763,7 @@ export default function TaskTracker() {
             </div>
             <div className="m-option-row">
               <span className="m-option-label">Fecha</span>
-              <DateField value={t.date} onChange={(v) => setDate(t.id, v)} overdue={isOverdue(t.date, t.status)} />
+              <DateField value={t.date} onChange={(v) => setDate(t.id, v)} overdue={isOverdue(t.date, t.status)} weekStartsSunday={weekStartsSunday} />
             </div>
             <div className="m-option-row">
               <span className="m-option-label">Área</span>
@@ -2885,6 +2952,7 @@ export default function TaskTracker() {
                     value={t.date}
                     onChange={(v) => setDate(t.id, v)}
                     overdue={isOverdue(t.date, t.status)}
+                    weekStartsSunday={weekStartsSunday}
                   />
                 </td>
                 <td><button className="row-del" onClick={() => removeTask(t.id)}><Trash2 size={14} /></button></td>
@@ -3147,6 +3215,9 @@ export default function TaskTracker() {
         .counter { font-size: 12.5px; padding: 6px 10px; border-radius: 7px; background: var(--surface); border: 1px solid var(--border); color: var(--text-dim); display: flex; gap: 5px; align-items: center; white-space: nowrap; flex-shrink: 0; }
         .counter b { color: var(--text); font-weight: 700; }
         .counter--warn b { color: var(--alta); }
+        .counter--clickable { cursor: pointer; }
+        .counter--clickable:hover { border-color: #33383f; }
+        .counter--active { border-color: var(--amber); background: rgba(232,163,61,0.08); }
         .iconbtn {
           display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-dim); background: var(--surface);
           border: 1px solid var(--border); border-radius: 7px; padding: 6px 10px; cursor: pointer; white-space: nowrap;
@@ -3385,7 +3456,7 @@ export default function TaskTracker() {
         .cal-day:hover { border-color: #33383f; }
         .cal-day--out { opacity: 0.35; }
         .cal-day--today { border-color: rgba(232,163,61,0.6); }
-        .cal-day--holiday { background: rgba(0,0,0,0.18); }
+        .cal-day--holiday { background: rgba(0,0,0,0.06); }
         .cal-day--selected { background: var(--surface-2); border-color: var(--amber); box-shadow: 0 0 0 1px var(--amber); }
         .cal-day-num { font-size: 12.5px; color: var(--text-dim); }
         .cal-day--today .cal-day-num { color: var(--amber); font-weight: 700; }
@@ -3792,6 +3863,18 @@ export default function TaskTracker() {
                   ? "Todas las tareas"
                   : (selectedProjectId ? areaMap[selectedAreaId]?.projects?.find((p) => p.id === selectedProjectId)?.name : areaMap[selectedAreaId]?.name)}
           </h1>
+          <button
+            className={`counter counter--clickable ${desktopExpandedFilter === "pendientes" ? "counter--active" : ""}`}
+            onClick={() => setDesktopExpandedFilter((f) => (f === "pendientes" ? null : "pendientes"))}
+          >
+            <span>Pendientes</span><b>{pendientes}</b>
+          </button>
+          <button
+            className={`counter counter--clickable ${vencidas > 0 ? "counter--warn" : ""} ${desktopExpandedFilter === "vencidas" ? "counter--active" : ""}`}
+            onClick={() => setDesktopExpandedFilter((f) => (f === "vencidas" ? null : "vencidas"))}
+          >
+            <span>Vencidas</span><b>{vencidas}</b>
+          </button>
           <div className="search-wrap">
             <Search size={13} color="var(--text-faint)" />
             <input placeholder="Buscar..." value={search} onChange={(e) => setSearch(e.target.value)} />
@@ -3811,8 +3894,6 @@ export default function TaskTracker() {
             <EyeOff size={13} />
           </button>
           <div className="topbar-spacer" />
-          <div className="counter"><span>Pendientes</span><b>{pendientes}</b></div>
-          <div className={`counter ${vencidas > 0 ? "counter--warn" : ""}`}><span>Vencidas</span><b>{vencidas}</b></div>
           <IconBtn icon={hideCompleted ? CheckCircle2 : Circle} label="Ocultar hechas" onClick={() => setHideCompleted((v) => !v)} active={hideCompleted} />
           <span className="bell-wrap">
             <button
@@ -3940,6 +4021,19 @@ export default function TaskTracker() {
             </div>
 
             <div className="groups">
+              {desktopExpandedFilter ? (
+                <>
+                  {(() => {
+                    const isolated = visibleTasks.filter((t) => (
+                      desktopExpandedFilter === "vencidas" ? isOverdue(t.date, t.status) : t.status !== "Hecho"
+                    ));
+                    return isolated.length === 0 ? (
+                      <div className="empty-state">Sin tareas {desktopExpandedFilter === "vencidas" ? "vencidas" : "pendientes"}.</div>
+                    ) : renderTaskTable(isolated, { showArea: true, showHeader: true });
+                  })()}
+                </>
+              ) : (
+              <>
               {grouped.length === 0 && (
                 <div className="empty-state">No hay tareas para mostrar. Escribí algo arriba y tocá "Procesar".</div>
               )}
@@ -4083,6 +4177,8 @@ export default function TaskTracker() {
                     <Plus size={14} /> Nueva área
                   </button>
                 )
+              )}
+              </>
               )}
             </div>
           </>
