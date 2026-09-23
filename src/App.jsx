@@ -719,6 +719,21 @@ export default function TaskTracker() {
   const [selectedProjectId, setSelectedProjectId] = useState(null);
   const [hideCompleted, setHideCompleted] = useState(true);
   const [desktopExpandedFilter, setDesktopExpandedFilter] = useState(null); // null | "pendientes" | "vencidas"
+  const viewBeforeFilterRef = useRef(null);
+
+  function toggleDesktopExpandedFilter(kind) {
+    setDesktopExpandedFilter((f) => {
+      if (f === kind) {
+        // turning off — go back to whatever view was active before
+        if (viewBeforeFilterRef.current) setView(viewBeforeFilterRef.current);
+        viewBeforeFilterRef.current = null;
+        return null;
+      }
+      if (f === null) viewBeforeFilterRef.current = view; // first time activating — remember where we were
+      setView("lista");
+      return kind;
+    });
+  }
   const [appLang, setAppLang] = useState(() => loadLocalPrefs().appLang || "es");
   const [weekStartsSunday, setWeekStartsSunday] = useState(() => !!loadLocalPrefs().weekStartsSunday);
   const [holidayCountry, setHolidayCountry] = useState(() => loadLocalPrefs().holidayCountry || "AR");
@@ -3248,15 +3263,15 @@ export default function TaskTracker() {
         .notif-row-meta { font-size: 12px; color: var(--text-faint); }
 
         /* ---- input card ---- */
-        .input-card { width: calc(100% - 40px); margin: 18px auto 6px; max-width: 1320px; height: 190px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface); }
+        .input-card { width: calc(100% - 40px); margin: 18px auto; max-width: 1320px; height: 160px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--surface); }
         .tabs { display: flex; border-bottom: 1px solid var(--border); }
         .tab-btn { padding: 11px 16px; font-size: 13.5px; color: var(--text-faint); background: none; border: none; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
         .tab-btn--active { color: var(--text); border-bottom-color: var(--amber); }
         .input-body { padding: 14px 16px; display: flex; gap: 12px; align-items: flex-start; }
         .input-body textarea {
           flex: 1; background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px;
-          color: var(--text); padding: 11px 12px; font-size: 14px; font-family: inherit; resize: none;
-          min-height: 58px; outline: none; line-height: 1.5;
+          color: var(--text); padding: 10px 12px; font-size: 14px; font-family: inherit; resize: none;
+          min-height: 38px; outline: none; line-height: 1.4;
         }
         .input-body textarea:focus { border-color: rgba(232,163,61,0.5); }
         .input-body textarea::placeholder { color: var(--text-faint); }
@@ -3276,7 +3291,7 @@ export default function TaskTracker() {
         .manual-area-fixed { display: flex; align-items: center; gap: 7px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; font-size: 13.5px; color: var(--text-dim); }
 
         /* ---- groups / table ---- */
-        .groups { flex: 1; overflow-y: auto; width: calc(100% - 40px); max-width: 1320px; margin: 0 auto; padding: 4px 0 24px; }
+        .groups { flex: 1; overflow-y: auto; width: calc(100% - 40px); max-width: 1320px; margin: 0 auto; padding: 0 0 24px; }
         .groups--first-view { padding-top: 18px; }
         .group { border: 1px solid var(--border); border-radius: 12px; margin-bottom: 16px; overflow: hidden; background: var(--surface); }
         .group-head { display: flex; align-items: center; gap: 10px; padding: 13px 16px; cursor: pointer; user-select: none; }
@@ -3456,7 +3471,7 @@ export default function TaskTracker() {
         .cal-day:hover { border-color: #33383f; }
         .cal-day--out { opacity: 0.35; }
         .cal-day--today { border-color: rgba(232,163,61,0.6); }
-        .cal-day--holiday { background: rgba(0,0,0,0.06); }
+        .cal-day--holiday { background: rgba(232,163,61,0.05); }
         .cal-day--selected { background: var(--surface-2); border-color: var(--amber); box-shadow: 0 0 0 1px var(--amber); }
         .cal-day-num { font-size: 12.5px; color: var(--text-dim); }
         .cal-day--today .cal-day-num { color: var(--amber); font-weight: 700; }
@@ -3865,13 +3880,13 @@ export default function TaskTracker() {
           </h1>
           <button
             className={`counter counter--clickable ${desktopExpandedFilter === "pendientes" ? "counter--active" : ""}`}
-            onClick={() => setDesktopExpandedFilter((f) => (f === "pendientes" ? null : "pendientes"))}
+            onClick={() => toggleDesktopExpandedFilter("pendientes")}
           >
             <span>Pendientes</span><b>{pendientes}</b>
           </button>
           <button
             className={`counter counter--clickable ${vencidas > 0 ? "counter--warn" : ""} ${desktopExpandedFilter === "vencidas" ? "counter--active" : ""}`}
-            onClick={() => setDesktopExpandedFilter((f) => (f === "vencidas" ? null : "vencidas"))}
+            onClick={() => toggleDesktopExpandedFilter("vencidas")}
           >
             <span>Vencidas</span><b>{vencidas}</b>
           </button>
@@ -3880,18 +3895,12 @@ export default function TaskTracker() {
             <input placeholder="Buscar..." value={search} onChange={(e) => setSearch(e.target.value)} />
           </div>
           <button
-            className={`iconbtn fav-filter-btn ${areaFilterMode === "solo" ? "fav-filter-btn--active" : ""}`}
-            onClick={() => setAreaFilterMode((m) => (m === "solo" ? "off" : "solo"))}
-            title="Mostrar solo las áreas favoritas"
+            className={`iconbtn fav-filter-btn ${areaFilterMode !== "off" ? "fav-filter-btn--active" : ""}`}
+            onClick={() => setAreaFilterMode((m) => (m === "off" ? "solo" : m === "solo" ? "mute" : "off"))}
+            title={areaFilterMode === "solo" ? "Mostrando solo favoritas — clic para ocultarlas" : areaFilterMode === "mute" ? "Ocultando favoritas — clic para apagar el filtro" : "Filtro de favoritas (apagado)"}
           >
-            <Star size={13} /> Favoritos
-          </button>
-          <button
-            className={`iconbtn icon-only fav-filter-btn ${areaFilterMode === "mute" ? "fav-filter-btn--active" : ""}`}
-            onClick={() => setAreaFilterMode((m) => (m === "mute" ? "off" : "mute"))}
-            title="Ocultar las áreas favoritas"
-          >
-            <EyeOff size={13} />
+            {areaFilterMode === "mute" ? <EyeOff size={13} /> : <Star size={13} fill={areaFilterMode === "solo" ? "currentColor" : "none"} />}
+            Favoritos
           </button>
           <div className="topbar-spacer" />
           <IconBtn icon={hideCompleted ? CheckCircle2 : Circle} label="Ocultar hechas" onClick={() => setHideCompleted((v) => !v)} active={hideCompleted} />
@@ -3969,6 +3978,7 @@ export default function TaskTracker() {
                 <>
                   <div className="input-body">
                     <textarea
+                      rows={1}
                       placeholder="Escribí todo lo que tenés en la cabeza... ej: reunión jueves urgente wanka moria, cortar pasto finde casa"
                       value={freeText}
                       onChange={(e) => setFreeText(e.target.value)}
