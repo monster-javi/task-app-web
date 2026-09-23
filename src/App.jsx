@@ -785,7 +785,10 @@ export default function TaskTracker() {
 
   const [deleteTarget, setDeleteTarget] = useState(null); // { type: 'area'|'project', id, areaId? }
 
-  const [view, setView] = useState(() => (loadLocalPrefs().view === "calendario" ? "calendario" : "lista"));
+  const [view, setView] = useState(() => {
+    const saved = loadLocalPrefs().view;
+    return saved === "calendario" || saved === "prioridad" ? saved : "lista";
+  });
   const [calView, setCalView] = useState(() => {
     const saved = loadLocalPrefs().calView;
     return saved === "semana" || saved === "dia" ? saved : "mes";
