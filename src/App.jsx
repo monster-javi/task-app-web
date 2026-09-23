@@ -716,9 +716,9 @@ export default function TaskTracker() {
   const taskSnapshotsRef = useRef(new Map()); // taskId -> last-saved JSON, for diffing
 
   const [selectedAreaId, setSelectedAreaId] = useState(() => loadLocalPrefs().selectedAreaId || "all");
-  const [selectedProjectId, setSelectedProjectId] = useState(null);
+  const [selectedProjectId, setSelectedProjectId] = useState(() => loadLocalPrefs().selectedProjectId || null);
   const [hideCompleted, setHideCompleted] = useState(true);
-  const [desktopExpandedFilter, setDesktopExpandedFilter] = useState(null); // null | "pendientes" | "vencidas"
+  const [desktopExpandedFilter, setDesktopExpandedFilter] = useState(() => loadLocalPrefs().desktopExpandedFilter || null); // null | "pendientes" | "vencidas"
   const viewBeforeFilterRef = useRef(null);
 
   function toggleDesktopExpandedFilter(kind) {
@@ -786,7 +786,10 @@ export default function TaskTracker() {
   const [deleteTarget, setDeleteTarget] = useState(null); // { type: 'area'|'project', id, areaId? }
 
   const [view, setView] = useState(() => (loadLocalPrefs().view === "calendario" ? "calendario" : "lista"));
-  const [calView, setCalView] = useState("mes");
+  const [calView, setCalView] = useState(() => {
+    const saved = loadLocalPrefs().calView;
+    return saved === "semana" || saved === "dia" ? saved : "mes";
+  });
   const [calCursor, setCalCursor] = useState(() => {
     const t = new Date();
     return { year: t.getFullYear(), month: t.getMonth() };
@@ -1387,8 +1390,8 @@ export default function TaskTracker() {
   useEffect(() => { areasRef.current = areas; }, [areas]);
 
   useEffect(() => {
-    saveLocalPrefs({ appLang, weekStartsSunday, holidayCountry, view, selectedAreaId, collapsedProjects });
-  }, [appLang, weekStartsSunday, holidayCountry, view, selectedAreaId, collapsedProjects]);
+    saveLocalPrefs({ appLang, weekStartsSunday, holidayCountry, view, selectedAreaId, selectedProjectId, collapsedProjects, calView, desktopExpandedFilter });
+  }, [appLang, weekStartsSunday, holidayCountry, view, selectedAreaId, selectedProjectId, collapsedProjects, calView, desktopExpandedFilter]);
 
   useEffect(() => {
     saveLocalPrefs({ areaFilterMode });
@@ -1417,6 +1420,12 @@ export default function TaskTracker() {
     }
     if (selectedAreaId !== "all" && !areas.some((a) => a.id === selectedAreaId)) {
       setSelectedAreaId("all");
+    }
+    if (selectedProjectId) {
+      const owningArea = selectedAreaId !== "all" ? areas.find((a) => a.id === selectedAreaId) : null;
+      if (!owningArea || !(owningArea.projects || []).some((p) => p.id === selectedProjectId)) {
+        setSelectedProjectId(null);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bootStatus, areas]);
